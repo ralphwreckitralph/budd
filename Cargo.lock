@@ -142,6 +142,7 @@ dependencies = [
  "budd-proto",
  "clap",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

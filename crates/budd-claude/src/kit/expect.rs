@@ -24,7 +24,8 @@
 
 use fancy_regex::Regex as FancyRegex;
 use regex::Regex;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use std::sync::LazyLock;
 
 /// The most characters a bullet may have.
@@ -84,17 +85,47 @@ impl Validation {
     }
 
     /// The finalize sidecar: every Expected bullet becomes an acceptance item, numbered in order.
-    pub fn sidecar(&self, ticket: Option<&str>) -> Value {
-        json!({
-            "ticket": ticket,
-            "source": SIDECAR_SOURCE,
-            "acceptance": self
+    pub fn sidecar(&self, ticket: Option<&str>) -> Sidecar {
+        Sidecar {
+            ticket: ticket.map(str::to_owned),
+            source: SIDECAR_SOURCE,
+            acceptance: self
                 .expected
                 .iter()
                 .enumerate()
-                .map(|(i, text)| json!({"id": format!("E{}", i + 1), "text": text}))
-                .collect::<Vec<_>>(),
-        })
+                .map(|(i, text)| Acceptance {
+                    id: format!("E{}", i + 1),
+                    text: text.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The acceptance sidecar, `expectations.json`, in the script's key order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Sidecar {
+    /// The ticket it is for, when one was named.
+    pub ticket: Option<String>,
+    /// Where it came from.
+    pub source: &'static str,
+    /// One item per Expected bullet.
+    pub acceptance: Vec<Acceptance>,
+}
+
+/// One Expected bullet, by id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Acceptance {
+    /// `E1`.
+    pub id: String,
+    /// The bullet's words.
+    pub text: String,
+}
+
+impl Sidecar {
+    /// The sidecar as JSON.
+    pub fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
     }
 }
 
@@ -227,10 +258,10 @@ pub fn validate(text: &str) -> Validation {
 }
 
 /// The sidecar as a file: two-space indent and a final newline.
-pub fn encode_sidecar(sidecar: &Value) -> String {
-    let mut text = serde_json::to_string_pretty(sidecar).unwrap_or_else(|_| sidecar.to_string());
+pub fn encode_sidecar(sidecar: &Sidecar) -> Result<String, serde_json::Error> {
+    let mut text = serde_json::to_string_pretty(sidecar)?;
     text.push('\n');
-    text
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -253,17 +284,23 @@ Potential risk:
         assert_eq!(found.errors, Vec::<String>::new());
         assert_eq!(found.summary(), "ok: 2 problems, 2 expected, 1 risk");
         let sidecar = found.sidecar(Some("CASBO-1"));
-        assert_eq!(sidecar["ticket"], "CASBO-1");
-        assert_eq!(sidecar["source"], SIDECAR_SOURCE);
-        assert_eq!(sidecar["acceptance"][0]["id"], "E1");
-        assert_eq!(sidecar["acceptance"][1]["id"], "E2");
+        let value = sidecar.to_value();
+        assert_eq!(value["ticket"], "CASBO-1");
+        assert_eq!(value["source"], SIDECAR_SOURCE);
+        assert_eq!(value["acceptance"][0]["id"], "E1");
+        assert_eq!(value["acceptance"][1]["id"], "E2");
         assert_eq!(
-            sidecar["acceptance"][1]["text"],
+            value["acceptance"][1]["text"],
             "The CSV header reads Bet Date/Time too."
         );
-        assert_eq!(sidecar["acceptance"].as_array().unwrap().len(), 2);
-        assert!(encode_sidecar(&sidecar).ends_with("}\n"));
-        assert_eq!(found.sidecar(None)["ticket"], Value::Null);
+        assert_eq!(value["acceptance"].as_array().unwrap().len(), 2);
+        let text = encode_sidecar(&sidecar).unwrap();
+        assert!(
+            text.starts_with("{\n  \"ticket\": \"CASBO-1\",\n  \"source\": "),
+            "{text}"
+        );
+        assert!(text.ends_with("}\n"));
+        assert_eq!(found.sidecar(None).to_value()["ticket"], Value::Null);
     }
 
     #[test]
