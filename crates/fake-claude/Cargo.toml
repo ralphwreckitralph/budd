@@ -1,10 +1,15 @@
 [package]
 name = "fake-claude"
-description = "A test double for the `claude` CLI, driven by recorded fixtures."
+description = "A test double for the `claude` CLI: the subcommands Budd drives, answered from files."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "fake-claude"
+path = "src/main.rs"
+
 [dependencies]
+serde_json = { workspace = true }

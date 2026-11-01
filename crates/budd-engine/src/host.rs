@@ -6,10 +6,12 @@
 
 use budd_claude::claude_cli::Claude;
 use budd_claude::hookrun::transcript_io::{FsTranscriptStore, locate_transcript};
+use budd_claude::messenger;
 use budd_claude::procs;
 use budd_claude::watch::{JobFile, JobInfo, modified};
 use budd_core::account::AccountStatus;
 use budd_core::crew::AgentRow;
+use budd_core::delivery::PathStyle;
 use budd_core::history::TranscriptStore;
 use budd_core::reply::Evidence;
 use std::path::{Path, PathBuf};
@@ -116,13 +118,22 @@ impl ClaudeHost for RealHost {
         self.claude.start_bg(cwd, argv).map_err(|error| error.to_string())
     }
 
-    fn send(&self, _target: &SendTarget, _message: &str, _pictures: &[String]) -> Outcome {
-        // The pseudo-terminal messenger is being written beside this crate; it is wired in here at merge.
-        Outcome::Unconfirmed("message delivery is wired at merge".to_owned())
+    fn send(&self, target: &SendTarget, message: &str, pictures: &[String]) -> Outcome {
+        let message = messenger::Message {
+            text: message.to_owned(),
+            pictures: pictures.iter().map(PathBuf::from).collect(),
+            files: Vec::new(),
+        };
+        outcome(messenger::send(
+            &self.claude,
+            &messenger_target(target),
+            &message,
+            path_style(),
+        ))
     }
 
-    fn clear(&self, _target: &SendTarget) -> Outcome {
-        Outcome::Unconfirmed("message delivery is wired at merge".to_owned())
+    fn clear(&self, target: &SendTarget) -> Outcome {
+        outcome(messenger::clear(&self.claude, &messenger_target(target)))
     }
 
     fn is_alive(&self, pid: u32) -> bool {
@@ -446,5 +457,32 @@ pub mod mock {
         fn transcripts(&self) -> &dyn TranscriptStore {
             self
         }
+    }
+}
+
+/// The messenger's view of a target.
+fn messenger_target(target: &SendTarget) -> messenger::Target {
+    messenger::Target {
+        short_id: target.short_id.clone(),
+        session_id: target.session_id.clone(),
+        transcript: target.transcript.clone(),
+        asleep: target.asleep,
+    }
+}
+
+/// The engine's view of what became of a message.
+fn outcome(outcome: messenger::Outcome) -> Outcome {
+    match outcome {
+        messenger::Outcome::Delivered { .. } => Outcome::Delivered,
+        messenger::Outcome::Unconfirmed(reason) => Outcome::Unconfirmed(reason),
+    }
+}
+
+/// How a dropped file's path is written for the session's shell on this platform.
+fn path_style() -> PathStyle {
+    if cfg!(windows) {
+        PathStyle::WindowsQuoted
+    } else {
+        PathStyle::Posix
     }
 }
