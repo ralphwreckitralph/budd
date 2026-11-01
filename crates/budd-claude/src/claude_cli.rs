@@ -305,6 +305,13 @@ pub fn child_env_from(exe_dir: &Path, config_dir: &Path, current: impl Fn(&str) 
             set("TMPDIR", tmpdir);
         }
         set("SHELL", present("SHELL").unwrap_or_else(default_shell));
+        // Claude Code finds its Keychain login by the user's name: without USER it reports the account
+        // logged out (seen on 2.1.316).
+        for name in ["USER", "LOGNAME"] {
+            if let Some(value) = present(name) {
+                set(name, value);
+            }
+        }
     }
     set("CLAUDE_CONFIG_DIR", config_dir.as_os_str().to_owned());
     let dropped = DROPPED_VARS
@@ -496,7 +503,18 @@ impl Claude {
 
     /// Who the config folder is logged in as, from `claude auth status --json`.
     pub fn auth_status(&self) -> Result<AccountStatus, Error> {
-        parse_auth_status(&self.run_checked(&["auth", "status", "--json"], &Self::neutral_cwd())?)
+        // `claude auth status` exits 1 when it judges the folder logged out, and still prints the JSON
+        // that says so; that answer is wanted, not an error.
+        let output = self.run(&["auth", "status", "--json"], &Self::neutral_cwd())?;
+        match parse_auth_status(&String::from_utf8_lossy(&output.stdout)) {
+            Ok(status) => Ok(status),
+            Err(_) if !output.status.success() => Err(Error::Failed {
+                command: "claude auth status --json".to_owned(),
+                status: output.status.code(),
+                last_line: last_line(&String::from_utf8_lossy(&output.stderr)),
+            }),
+            Err(error) => Err(error),
+        }
     }
 
     /// The MCP servers the folder's sessions load, health-checked by `claude mcp list`, which takes a
@@ -692,6 +710,24 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), env.vars.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_child_env_keeps_the_user_name_for_the_keychain() {
+        let env = child_env_from(
+            Path::new("/opt/claude/bin"),
+            Path::new("/Users/ralph/.budd/claude"),
+            |name| match name {
+                "HOME" => Some("/Users/ralph".into()),
+                "USER" => Some("ralph".into()),
+                "LOGNAME" => Some("ralph".into()),
+                _ => None,
+            },
+        );
+        let get = |key: &str| env.vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(get("USER").as_deref(), Some(std::ffi::OsStr::new("ralph")));
+        assert_eq!(get("LOGNAME").as_deref(), Some(std::ffi::OsStr::new("ralph")));
     }
 
     #[test]
