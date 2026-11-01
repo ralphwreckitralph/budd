@@ -8,7 +8,7 @@
 
 use crate::ClientId;
 use crate::config::Config;
-use crate::engine::{Completion, Effect, Engine, Outgoing};
+use crate::engine::{Completion, Effect, Engine};
 use crate::host::{ClaudeHost, RealHost};
 use crate::server::{Clients, Inbound, Server, serve_connection};
 use budd_claude::claude_cli::{Claude, locate};
@@ -320,7 +320,7 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
         let _ = cadence_tx.send_replace(engine.cadence());
         for outgoing in engine.take_outgoing() {
-            dispatch(&mut clients, outgoing);
+            clients.dispatch(outgoing);
         }
         let mut shutdown = false;
         for effect in engine.take_effects() {
@@ -337,10 +337,6 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
     }
     Ok(())
-}
-
-fn dispatch(clients: &mut Clients, outgoing: Outgoing) {
-    clients.dispatch(outgoing);
 }
 
 /// Runs one slow effect on a blocking thread and sends its completion back.
