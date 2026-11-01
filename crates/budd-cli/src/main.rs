@@ -29,6 +29,9 @@ struct Cli {
 enum Command {
     /// The lifecycle hook Claude Code runs on every session event (reads the event on stdin).
     Hook {
+        /// The event's name, as the settings pass it; the event on stdin is the one that counts.
+        #[arg(value_name = "EVENT")]
+        event: Option<String>,
         /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
         #[arg(long, value_name = "DIR")]
         home: Option<PathBuf>,
@@ -364,7 +367,11 @@ fn run_watch(home: Option<PathBuf>) -> Result<(), String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Hook { home, legacy_state_dir } => {
+        Command::Hook {
+            event: _,
+            home,
+            legacy_state_dir,
+        } => {
             budd_claude::hookrun::main(budd_claude::hookrun::Options { home, legacy_state_dir });
             ExitCode::SUCCESS
         }
