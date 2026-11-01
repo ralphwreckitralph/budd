@@ -4,9 +4,12 @@
 //! the OS only through [`host::ClaudeHost`]. [`daemon`] runs it: the single instance lock, the server on
 //! the endpoint, the pollers and the clock.
 
+pub mod client;
 pub mod config;
+pub mod daemon;
 pub mod engine;
 pub mod host;
+pub mod server;
 pub mod state;
 
 pub use config::Config;
