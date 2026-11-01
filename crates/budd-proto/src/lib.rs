@@ -705,6 +705,9 @@ pub struct LogEvent {
 }
 
 /// What the daemon tells its subscribers. The `ev` field on the wire names the variant.
+// A presence event carries the whole state file and the others a few fields; each is built once and
+// serialized, so the size difference costs nothing worth a Box in every client's match.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "lowercase")]
 pub enum Event {
@@ -850,12 +853,7 @@ mod tests {
                 },
                 "mode",
             ),
-            (
-                Command::AttentionSeen {
-                    session: "s1".into(),
-                },
-                "attention.seen",
-            ),
+            (Command::AttentionSeen { session: "s1".into() }, "attention.seen"),
             (Command::UnreadRead, "unread.read"),
             (
                 Command::HistoryPage {
@@ -879,10 +877,7 @@ mod tests {
             (Command::Shutdown, "shutdown"),
         ];
         for (command, name) in commands {
-            let request = Request {
-                id: Some(7),
-                command,
-            };
+            let request = Request { id: Some(7), command };
             let json = round_trip(&request);
             assert_eq!(json["cmd"], name, "{json}");
             assert_eq!(json["id"], 7);
@@ -895,7 +890,12 @@ mod tests {
         match ClientLine::parse(line).expect("parses") {
             ClientLine::Request(Request {
                 id: Some(1),
-                command: Command::Hello { client, proto, subscribe },
+                command:
+                    Command::Hello {
+                        client,
+                        proto,
+                        subscribe,
+                    },
             }) => {
                 assert_eq!(client, "ui");
                 assert_eq!(proto, 1);
@@ -930,7 +930,10 @@ mod tests {
         assert!(ClientLine::parse("{}").is_err());
         assert!(ClientLine::parse(r#"{"cmd":"dance"}"#).is_err());
         // Targets.
-        assert_eq!(serde_json::to_string(&Target::Assistant).expect("json"), r#""assistant""#);
+        assert_eq!(
+            serde_json::to_string(&Target::Assistant).expect("json"),
+            r#""assistant""#
+        );
         assert_eq!(
             serde_json::to_string(&Target::Crew("s1".into())).expect("json"),
             r#"{"crew":"s1"}"#
@@ -951,7 +954,10 @@ mod tests {
             },
         );
         let json = round_trip(&sent);
-        assert_eq!(json, json!({"id": 4, "ok": true, "delivered": false, "reason": "timed out"}));
+        assert_eq!(
+            json,
+            json!({"id": 4, "ok": true, "delivered": false, "reason": "timed out"})
+        );
         assert_eq!(
             sent.decode::<SendReply>(),
             Some(SendReply {
@@ -974,7 +980,10 @@ mod tests {
         assert_eq!(json["proto"], 1);
         assert!(json["snapshot"]["presence"]["presence"]["mood"] == "sleeping");
         let tool = Reply::ok(6, &ToolResult::ok("Said."));
-        assert_eq!(round_trip(&tool), json!({"id": 6, "ok": true, "text": "Said.", "isError": false}));
+        assert_eq!(
+            round_trip(&tool),
+            json!({"id": 6, "ok": true, "text": "Said.", "isError": false})
+        );
         round_trip(&Reply::ok(
             7,
             &ArchiveReply {
@@ -1130,8 +1139,7 @@ mod tests {
                 ..
             }))
         ));
-        let event: Event =
-            serde_json::from_str(r#"{"ev":"unread","count":1,"something_new":[1]}"#).expect("decodes");
+        let event: Event = serde_json::from_str(r#"{"ev":"unread","count":1,"something_new":[1]}"#).expect("decodes");
         assert_eq!(
             event,
             Event::Unread(UnreadEvent {

@@ -412,13 +412,15 @@ impl JobFile {
             return false;
         }
         self.modified = modified;
-        self.info = modified.and_then(|_| fs::read_to_string(&self.path).ok()).and_then(|text| {
-            let state = JobState::decode(&text)?;
-            let needs = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|value| value.get("needs").and_then(|n| n.as_str()).map(str::to_owned));
-            Some(JobInfo { state, needs })
-        });
+        self.info = modified
+            .and_then(|_| fs::read_to_string(&self.path).ok())
+            .and_then(|text| {
+                let state = JobState::decode(&text)?;
+                let needs = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|value| value.get("needs").and_then(|n| n.as_str()).map(str::to_owned));
+                Some(JobInfo { state, needs })
+            });
         true
     }
 }
@@ -464,7 +466,10 @@ mod tests {
         let start = std::time::Instant::now();
         let rows = poller.next().await.unwrap();
         assert_eq!(rows.len(), 5);
-        assert!(start.elapsed() < CALM_INTERVAL / 1000, "the first listing waits for nothing");
+        assert!(
+            start.elapsed() < CALM_INTERVAL / 1000,
+            "the first listing waits for nothing"
+        );
         let before = std::time::Instant::now();
         poller.next().await.unwrap();
         assert!(before.elapsed() >= CALM_INTERVAL / 1000);
