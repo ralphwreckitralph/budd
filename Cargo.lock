@@ -105,9 +105,11 @@ name = "budd-claude"
 version = "0.0.0"
 dependencies = [
  "budd-core",
+ "fancy-regex",
  "libc",
  "notify",
  "portable-pty",
+ "regex",
  "semver",
  "serde",
  "serde_json",

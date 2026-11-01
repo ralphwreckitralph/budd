@@ -7,6 +7,7 @@ pub mod compat;
 pub mod config;
 pub mod crew;
 pub mod doctor;
+pub mod gate;
 pub mod hookrun;
 pub mod ipc;
 pub mod mcp_stdio;
