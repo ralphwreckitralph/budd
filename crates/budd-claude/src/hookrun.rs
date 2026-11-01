@@ -96,17 +96,31 @@ fn now() -> f64 {
 
 /// Runs the hook as the binary does: the event on stdin, the real environment, the folders under the Budd
 /// home. Never fails: errors go to the log, and the process exits 0 either way.
-pub fn main() {
+/// What the command line may set for one run of the hook. Claude Code's background supervisor does not pass the
+/// user's shell environment to the sessions it starts, so anything that varies travels as an argument.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Options {
+    /// The Budd home folder, overriding `BUDD_HOME` and `~/.budd`.
+    pub home: Option<PathBuf>,
+    /// A second folder that gets a copy of every state and reply file, for the existing macOS app.
+    pub legacy_state_dir: Option<PathBuf>,
+}
+
+/// Runs the hook as the binary does: the event on stdin, the real environment, the folders under the Budd
+/// home. Never fails: errors go to the log, and the process exits 0 either way.
+pub fn main(options: Options) {
     let env: Vec<(String, String)> = std::env::vars().collect();
-    let home = budd_home(|key| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()));
+    let lookup = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    let home = options.home.clone().unwrap_or_else(|| budd_home(lookup));
+    let legacy = options.legacy_state_dir.clone().or_else(|| {
+        lookup(LEGACY_STATE_DIR_VAR)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    });
     let dirs = Dirs {
         sessions: Dir(home.join("state").join("sessions")),
-        legacy: env
-            .iter()
-            .find(|(k, _)| k == LEGACY_STATE_DIR_VAR)
-            .map(|(_, v)| v.trim())
-            .filter(|v| !v.is_empty())
-            .map(|v| Dir(PathBuf::from(v))),
+        legacy: legacy.map(Dir),
     };
     let mut input = String::new();
     if let Err(error) = io::stdin().lock().read_to_string(&mut input) {
