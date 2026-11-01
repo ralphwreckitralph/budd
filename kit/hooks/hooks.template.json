@@ -1,5 +1,5 @@
 {
-  "description": "Template for hooks.json. `budd kit install` renders it by replacing {{EXE}} with `.exe` on Windows and nothing elsewhere, and `budd kit verify` refuses a live hooks.json that does not match this rendering. Every entry is exec-form: Claude Code runs the binary directly, with no shell in between, and `budd hook <Event>` reads the event JSON on stdin and dispatches to the gate, guard, budget, rethinker trigger, lint-edit, session-start and state writers that gamecenter wired as separate shell hooks.",
+  "description": "Template for hooks.json. `budd kit install` renders it by replacing {{EXE}} with `.exe` on Windows and nothing elsewhere, and `budd kit verify` refuses a live hooks.json that does not match this rendering. Every entry is exec-form: Claude Code runs the binary directly, with no shell in between, and `budd hook <Event>` reads the event JSON on stdin and dispatches to the gate, guard, budget, rethinker trigger, lint-edit, session-start and state writers that the private project wired as separate shell hooks.",
   "hooks": {
     "PreToolUse": [
       {

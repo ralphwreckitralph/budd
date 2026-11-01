@@ -37,7 +37,7 @@ A field that is not configured is printed as `not configured`, so a skill readin
 ## Example
 
 ```
-Budd project: toy (/Users/me/code/toy), tracker github, prefixes: none (keys like #123)
+Budd project: toy (~/code/toy), tracker github, prefixes: none (keys like #123)
 repo app: . remote owner/toy base main anchor
 worktree: create configured, up not configured, status not configured, env file none, app url none
 verify app: lint `npm run lint` unit `npx vitest run` build `npm run build` extra: none flaky: none

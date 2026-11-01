@@ -1,0 +1,80 @@
+{
+  "name": "admin-suite",
+  "root": "~/code/admin-suite",
+  "ticket": {
+    "kind": "jira",
+    "prefixes": ["PROJ"],
+    "site": "example.atlassian.net",
+    "comment_skill": "/jira-comment"
+  },
+  "repos": [
+    { "id": "fe", "path": "frontend", "remote": "example-org/admin-frontend", "base": "develop", "anchor": true },
+    { "id": "be", "path": "backend", "remote": "example-org/admin-backend-api", "base": "develop", "anchor": false }
+  ],
+  "worktree": {
+    "create": "scripts/worktree create {key} --pull",
+    "resume": "scripts/worktree resume {key}",
+    "up": "scripts/worktree up {key}",
+    "status": "scripts/worktree status {key}",
+    "repo_paths": { "fe": "{worktree}/frontend", "be": "{worktree}/backend" },
+    "env_file": ".worktree.env",
+    "app_url": "http://localhost:{FE_PORT}"
+  },
+  "verify": {
+    "fe": {
+      "lint": "npm run lint",
+      "unit": "npx vitest run",
+      "build": "npm run build:staging",
+      "file_lint": "npx eslint {file}",
+      "flaky": ["e2e"],
+      "extra_gates": [
+        { "label": "key-contract", "command": "bash scripts/key-contract.sh --fe {fe} --be {be} --base {base} --explain", "when": "always" }
+      ],
+      "coverage": { "kind": "lcov", "command": "npx vitest run --coverage --coverage.reporter=lcov --coverage.reportsDirectory=.cov", "report": "unit-fe/.cov/lcov.info" }
+    },
+    "be": {
+      "lint": "composer run lint",
+      "unit": "vendor/bin/phpunit",
+      "build": "",
+      "file_lint": "php -l {file}",
+      "flaky": [],
+      "extra_gates": []
+    }
+  },
+  "standards": {
+    "cards": ".claude/pipeline/coding-standards",
+    "rules": ".claude/pipeline/coding-standards/rules.tsv"
+  },
+  "git": {
+    "protected": ["develop", "main", "master"],
+    "never_commit": ["frontend/config.php", "frontend/apps/main/.env.development.local", "**/*.local", "backend/app/settings.php"],
+    "gate_config": [".github/workflows/**", "frontend/eslint.config.*", "frontend/vitest.config.*", "backend/phpunit.xml"],
+    "test_paths": ["frontend/unit-fe/tests/**", "backend/unit-be/tests/**"]
+  },
+  "database": {
+    "writes": "never",
+    "read": "php backend/scripts/db-read.php",
+    "context_patterns": ["mysql", "mariadb", "\\.sql$", "db-read"],
+    "authoring_allowed": ["backend/docs/db/**"]
+  },
+  "http": { "write_verbs": ["POST", "PUT", "PATCH", "DELETE"] },
+  "critical": {
+    "paths": ["backend/**", "frontend/api/**", "**/config.php", "**/*.sql"],
+    "topics": ["auth", "session", "permission", "money", "schema", "server-setting", "deploy", "dependency", "irreversible"]
+  },
+  "team": {
+    "roles": {
+      "test-author": { "owns": ["frontend/unit-fe/tests/**", "backend/unit-be/tests/**"] },
+      "fe-builder": { "owns": ["frontend/**"], "except": ["frontend/unit-fe/tests/**"], "frozen": ["frontend/config.php"] },
+      "be-builder": { "owns": ["backend/**"], "except": ["backend/unit-be/tests/**"], "frozen": ["backend/app/settings.php", "backend/app/routes.php"] },
+      "verifier": { "owns": [] }
+    },
+    "contract": "contract.md"
+  },
+  "ask": { "transport": "reply" },
+  "evidence": {
+    "shots": true,
+    "login_env": { "user": "APP_TEST_USER", "password": "APP_TEST_PASSWORD" }
+  },
+  "pr": { "draft": true, "ci_wait_minutes": 20 }
+}

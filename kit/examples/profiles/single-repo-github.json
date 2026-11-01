@@ -1,0 +1,53 @@
+{
+  "name": "toy",
+  "root": "~/code/toy",
+  "ticket": {
+    "kind": "github",
+    "prefixes": []
+  },
+  "repos": [
+    { "id": "app", "path": ".", "remote": "example-org/toy", "base": "main", "anchor": true }
+  ],
+  "worktree": {
+    "create": "git worktree add ../worktrees/toy-{key} -b {key} origin/{base}",
+    "up": "",
+    "status": "",
+    "repo_paths": { "app": "{worktree}" },
+    "env_file": "",
+    "app_url": ""
+  },
+  "verify": {
+    "app": {
+      "lint": "npm run lint",
+      "unit": "npx vitest run",
+      "build": "npm run build",
+      "file_lint": "npx eslint {file}",
+      "flaky": [],
+      "extra_gates": []
+    }
+  },
+  "git": {
+    "protected": ["main"],
+    "never_commit": [".env", ".env.*.local"],
+    "gate_config": [".github/workflows/**", "eslint.config.*", "vitest.config.*"],
+    "test_paths": ["tests/**"]
+  },
+  "database": {
+    "writes": "never"
+  },
+  "critical": {
+    "paths": ["src/auth/**", "src/billing/**"],
+    "topics": ["auth", "money", "schema", "deploy", "dependency", "irreversible"]
+  },
+  "team": {
+    "roles": {
+      "test-author": { "owns": ["tests/**"] },
+      "builder": { "owns": ["**"], "except": ["tests/**"], "frozen": [".env"] },
+      "verifier": { "owns": [] }
+    },
+    "contract": "contract.md"
+  },
+  "ask": { "transport": "reply" },
+  "evidence": { "shots": false },
+  "pr": { "draft": true, "ci_wait_minutes": 20 }
+}
