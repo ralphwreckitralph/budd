@@ -415,6 +415,153 @@ impl OfficeChat {
     }
 }
 
+/// One session as `claude agents --json` lists it. Every field is optional and unknown keys are ignored,
+/// as the output belongs to Claude Code and may change between versions; what a row lacks decides what
+/// [`live_sessions`] makes of it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentRow {
+    /// The short id, what `claude attach`, `stop` and `logs` take.
+    pub id: Option<String>,
+    /// The full session id, what its hooks and transcript are named after.
+    pub session_id: Option<String>,
+    /// The display name given with `--name`.
+    pub name: Option<String>,
+    /// The folder the session was started in.
+    pub cwd: Option<String>,
+    /// The process, or `None` once Claude Code has let it go.
+    pub pid: Option<u32>,
+    /// "idle", "busy" or "waiting".
+    pub status: Option<String>,
+    /// Where its job stands: "working", "blocked", "done", "failed" or "stopped".
+    pub state: Option<String>,
+    /// What a waiting session waits for, as Claude Code words it.
+    pub waiting_for: Option<String>,
+    /// When it started, as Claude Code counts it (milliseconds since the epoch, as of 2.1.316).
+    pub started_at: Option<f64>,
+    /// "background" for a session started with `--bg`; interactive sessions say otherwise.
+    pub kind: Option<String>,
+}
+
+/// What `claude agents` says a session is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Status {
+    /// At its prompt.
+    Idle,
+    /// In a turn.
+    Busy,
+    /// Its turn is paused on the human: a permission, a question.
+    Waiting,
+}
+
+impl Status {
+    /// The status Claude Code names `word`, or `None` for one this module does not know.
+    pub fn parse(word: &str) -> Option<Status> {
+        match word {
+            "idle" => Some(Status::Idle),
+            "busy" => Some(Status::Busy),
+            "waiting" => Some(Status::Waiting),
+            _ => None,
+        }
+    }
+}
+
+/// Where a background session's job stands, as `claude agents` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentState {
+    /// Working through its turn.
+    Working,
+    /// Its turn ended waiting on the human.
+    Blocked,
+    /// Its work is finished.
+    Done,
+    /// Its turn ended on an error.
+    Failed,
+    /// It was stopped.
+    Stopped,
+}
+
+impl AgentState {
+    /// The state Claude Code names `word`, or `None` for one this module does not know.
+    pub fn parse(word: &str) -> Option<AgentState> {
+        match word {
+            "working" => Some(AgentState::Working),
+            "blocked" => Some(AgentState::Blocked),
+            "done" => Some(AgentState::Done),
+            "failed" => Some(AgentState::Failed),
+            "stopped" => Some(AgentState::Stopped),
+            _ => None,
+        }
+    }
+}
+
+/// A background session that is on the bridge: its process is alive, or it is asleep while it waits on
+/// the human (from SessionLauncher.LiveSession).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveSession {
+    /// The short id, what `claude attach` takes.
+    pub id: String,
+    /// The full session id, what its hooks and transcript are named after.
+    pub session_id: String,
+    /// Its name, or its short id when it was started without one.
+    pub name: String,
+    /// Its process, or `None` for a session Claude Code retired while it waited on the human
+    /// ([`CrewBoard::keeps_asleep`]); `claude attach` wakes it, so a message still reaches it.
+    pub pid: Option<u32>,
+    /// The folder it was started in.
+    pub cwd: String,
+    /// What it is doing right now, when Claude Code said something this module knows.
+    pub status: Option<Status>,
+    /// Where its job stands, when Claude Code said something this module knows.
+    pub state: Option<AgentState>,
+    /// What a waiting session waits for.
+    pub waiting_for: Option<String>,
+    /// When it started, as Claude Code counts it; 0 when the row did not say.
+    pub started_at: f64,
+}
+
+impl LiveSession {
+    /// Whether its process is gone: it stays listed only because it waits on the human.
+    pub fn asleep(&self) -> bool {
+        self.pid.is_none()
+    }
+}
+
+/// The background sessions in `rows` that belong on the bridge, oldest first: every one whose process
+/// `alive` confirms, and every one asleep while it waits on the human. `claude agents --json` also lists
+/// interactive sessions, and the background ones a restart killed or the daemon retired (no pid, or a
+/// dead one); apart from the blocked crew, those are gone. A row without an id, session id or folder
+/// is not a session this module can do anything with and is skipped.
+pub fn live_sessions(rows: &[AgentRow], assistant: &str, alive: impl Fn(u32) -> bool) -> Vec<LiveSession> {
+    let mut sessions: Vec<LiveSession> = rows
+        .iter()
+        .filter(|row| row.kind.as_deref() == Some("background"))
+        .filter_map(|row| {
+            let id = row.id.clone()?;
+            let session_id = row.session_id.clone()?;
+            let cwd = row.cwd.clone()?;
+            let name = row.name.clone().unwrap_or_else(|| id.clone());
+            let pid = row.pid.filter(|pid| alive(*pid));
+            if pid.is_none() && !CrewBoard::keeps_asleep(row.state.as_deref(), &name, assistant) {
+                return None;
+            }
+            Some(LiveSession {
+                id,
+                session_id,
+                name,
+                pid,
+                cwd,
+                status: row.status.as_deref().and_then(Status::parse),
+                state: row.state.as_deref().and_then(AgentState::parse),
+                waiting_for: row.waiting_for.clone(),
+                started_at: row.started_at.unwrap_or(0.0),
+            })
+        })
+        .collect();
+    sessions.sort_by(|a, b| a.started_at.total_cmp(&b.started_at));
+    sessions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,5 +854,89 @@ mod tests {
         // Every name it makes is one the crew script takes.
         assert!(CrewName::parse(&long).is_ok());
         assert!(CrewName::parse("chat-0905").is_ok());
+    }
+
+    fn row(id: &str, name: Option<&str>, pid: Option<u32>, state: Option<&str>, started_at: f64) -> AgentRow {
+        AgentRow {
+            id: Some(id.to_owned()),
+            session_id: Some(format!("{id}-full")),
+            name: name.map(str::to_owned),
+            cwd: Some("/w/repo".to_owned()),
+            pid,
+            status: Some("idle".to_owned()),
+            state: state.map(str::to_owned),
+            kind: Some("background".to_owned()),
+            started_at: Some(started_at),
+            ..AgentRow::default()
+        }
+    }
+
+    #[test]
+    fn the_bridge_keeps_live_processes_and_blocked_sleepers_oldest_first() {
+        let rows = [
+            row("b2", Some("casbo-2"), Some(202), Some("working"), 2.0),
+            row("a1", Some("assistant"), Some(101), None, 1.0),
+            row("c3", Some("casbo-3"), None, Some("blocked"), 3.0),
+            row("d4", Some("casbo-4"), Some(404), Some("blocked"), 4.0),
+            row("e5", Some("casbo-5"), Some(505), Some("done"), 5.0),
+            row("f6", Some("assistant"), None, Some("blocked"), 6.0),
+            row("g7", None, Some(707), None, 7.0),
+        ];
+        let dead = [404, 505];
+        let sessions = live_sessions(&rows, "assistant", |pid| !dead.contains(&pid));
+        assert_eq!(
+            sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["a1", "b2", "c3", "d4", "g7"]
+        );
+        assert_eq!(sessions[0].pid, Some(101));
+        assert_eq!(sessions[1].state, Some(AgentState::Working));
+        assert!(sessions[2].asleep());
+        assert_eq!(sessions[2].state, Some(AgentState::Blocked));
+        // A blocked session whose process died is asleep, not gone.
+        assert!(sessions[3].asleep());
+        // A row without a name goes by its id.
+        assert_eq!(sessions[4].name, "g7");
+        assert_eq!(sessions[4].session_id, "g7-full");
+        assert_eq!(sessions[4].status, Some(Status::Idle));
+    }
+
+    #[test]
+    fn only_background_rows_with_the_fields_the_bridge_needs_count() {
+        let mut interactive = row("i1", Some("term"), Some(1), None, 1.0);
+        interactive.kind = Some("interactive".to_owned());
+        let mut no_kind = row("k2", Some("x"), Some(2), None, 2.0);
+        no_kind.kind = None;
+        let mut no_cwd = row("c3", Some("y"), Some(3), None, 3.0);
+        no_cwd.cwd = None;
+        let mut no_session = row("s4", Some("z"), Some(4), None, 4.0);
+        no_session.session_id = None;
+        let mut odd_words = row("o5", Some("w"), Some(5), Some("paused"), 5.0);
+        odd_words.status = Some("thinking".to_owned());
+        odd_words.started_at = None;
+        let rows = [interactive, no_kind, no_cwd, no_session, odd_words];
+        let sessions = live_sessions(&rows, "assistant", |_| true);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "o5");
+        assert_eq!(sessions[0].status, None);
+        assert_eq!(sessions[0].state, None);
+        assert_eq!(sessions[0].started_at, 0.0);
+    }
+
+    #[test]
+    fn an_agent_row_takes_what_claude_prints_and_ignores_the_rest() {
+        let json = r#"{"id": "abc123", "sessionId": "0f1e-2d3c", "name": "casbo-1", "cwd": "/w",
+            "pid": 4242, "status": "waiting", "state": "blocked", "waitingFor": "permission",
+            "startedAt": 1761900000000, "kind": "background", "somethingNew": {"x": 1}}"#;
+        let row: AgentRow = serde_json::from_str(json).expect("decodes");
+        assert_eq!(row.id.as_deref(), Some("abc123"));
+        assert_eq!(row.pid, Some(4242));
+        assert_eq!(row.waiting_for.as_deref(), Some("permission"));
+        assert_eq!(row.started_at, Some(1761900000000.0));
+        let bare: AgentRow = serde_json::from_str("{}").expect("decodes");
+        assert_eq!(bare, AgentRow::default());
+        assert_eq!(Status::parse("busy"), Some(Status::Busy));
+        assert_eq!(Status::parse("Busy"), None);
+        assert_eq!(AgentState::parse("stopped"), Some(AgentState::Stopped));
+        assert_eq!(AgentState::parse(""), None);
     }
 }
