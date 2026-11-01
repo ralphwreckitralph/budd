@@ -308,13 +308,18 @@ mod tests {
         fs::copy(fixture("bg-haiku-f754f44d.jsonl"), old.join("sid.jsonl")).unwrap();
         fs::copy(fixture("bg-haiku-cc7d868c.jsonl"), new.join("sid.jsonl")).unwrap();
         fs::write(new.join("notes.txt"), "not a transcript").unwrap();
-        let then = SystemTime::now() - std::time::Duration::from_secs(3600);
-        File::options()
-            .write(true)
-            .open(old.join("sid.jsonl"))
-            .unwrap()
-            .set_modified(then)
-            .unwrap();
+        // `fs::copy` keeps the fixture's own time on some platforms (macOS copies metadata), so both
+        // times are set by hand: the new one now, the old one an hour before.
+        let now = SystemTime::now();
+        let then = now - std::time::Duration::from_secs(3600);
+        for (path, at) in [(old.join("sid.jsonl"), then), (new.join("sid.jsonl"), now)] {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
 
         assert_eq!(
             locate_transcript(config, "sid", "/Users/alice/one"),
