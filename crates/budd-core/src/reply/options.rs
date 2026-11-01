@@ -15,6 +15,7 @@
 //! a session that only knows `Reply:` is never answered for the human.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -22,7 +23,8 @@ static LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*\**(reply|d
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
 
 /// Who may answer the line: the human (`Reply:`) or any Claude with the context (`Decide:`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// The human's to answer.
     #[default]
@@ -32,7 +34,7 @@ pub enum Kind {
 }
 
 /// The answers a reply's last line offers, and the reply without that line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyOptions {
     /// The answers, in the order written.
     pub answers: Vec<String>,

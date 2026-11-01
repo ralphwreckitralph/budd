@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// A question a session put to the human through Budd's `ask` tool: the same ask as a reply ending in a
 /// `Reply:` or `Decide:` line, made with a tool call instead of a convention.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuddAsk {
     /// What the session needs from the human.
     pub question: String,

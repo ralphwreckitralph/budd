@@ -182,7 +182,7 @@ impl Listener {
 
     /// One new pipe instance under the listener's security descriptor.
     fn instance(&self, first: bool) -> io::Result<HANDLE> {
-        let mut attributes = SECURITY_ATTRIBUTES {
+        let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: self.descriptor.0,
             bInheritHandle: 0,
@@ -202,7 +202,7 @@ impl Listener {
                 super::LONGEST_LINE as u32,
                 super::LONGEST_LINE as u32,
                 0,
-                &mut attributes,
+                &attributes,
             )
         };
         if handle == INVALID_HANDLE_VALUE {

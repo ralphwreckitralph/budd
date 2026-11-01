@@ -7,7 +7,7 @@
 
 use crate::fingerprint::fingerprint;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use thiserror::Error;
@@ -24,7 +24,7 @@ static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]{
 /// What Claude Code's background-job runner keeps about a session in `<config>/jobs/<short id>/state.json`:
 /// its state (working, blocked on the human, done), a line on where it stands, and the command it was
 /// started with. Every field is optional, as the file belongs to Claude Code and may change.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobState {
     /// "working", "blocked", "done", or whatever Claude Code writes.
     #[serde(default)]
@@ -444,7 +444,8 @@ pub struct AgentRow {
 }
 
 /// What `claude agents` says a session is doing right now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     /// At its prompt.
     Idle,
@@ -467,7 +468,8 @@ impl Status {
 }
 
 /// Where a background session's job stands, as `claude agents` reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AgentState {
     /// Working through its turn.
     Working,
@@ -497,7 +499,7 @@ impl AgentState {
 
 /// A background session that is on the bridge: its process is alive, or it is asleep while it waits on
 /// the human (from SessionLauncher.LiveSession).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveSession {
     /// The short id, what `claude attach` takes.
     pub id: String,

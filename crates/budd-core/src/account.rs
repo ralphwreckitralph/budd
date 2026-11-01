@@ -5,6 +5,7 @@
 //! folder trust over to it, and keeps its `settings.json` wired to Budd's hooks.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::LazyLock;
 
@@ -18,7 +19,7 @@ pub const SERVER_NAME: &str = "budd";
 
 /// Who a Claude config folder is logged in as, from `claude auth status --json`. Every field but
 /// `logged_in` is optional, as the output belongs to Claude Code and may change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountStatus {
     /// Whether the folder has an account at all.
     pub logged_in: bool,

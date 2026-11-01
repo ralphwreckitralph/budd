@@ -7,11 +7,13 @@
 
 use super::options::{Kind, ReplyOptions};
 use crate::fingerprint::fingerprint;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
 /// Who answers the crew's asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PilotMode {
     /// Every ask waits for the human.
     #[default]
@@ -39,7 +41,7 @@ impl PilotMode {
 }
 
 /// One answer autopilot gave: to which reply (its fingerprint), what, and when.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Answer {
     /// The fingerprint of the reply answered.
     pub reply: String,

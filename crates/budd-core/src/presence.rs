@@ -12,7 +12,8 @@ use std::sync::LazyLock;
 static PASTE_OPEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<pasted_content[^>]*> ?").unwrap());
 
 /// What the avatar is showing, from the session's point of view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Mood {
     /// The session is at its prompt with nothing to do.
     Idle,
@@ -240,7 +241,7 @@ impl SessionReport {
 }
 
 /// What the avatar shows: a mood and, for some moods, a line about it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presence {
     /// The mood shown.
     pub mood: Mood,

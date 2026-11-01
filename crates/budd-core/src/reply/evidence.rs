@@ -4,14 +4,14 @@
 //! outside the worktree, so it outlives the change; the crew card shows it beside the session's reply.
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 static TICKET_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z][A-Z0-9]*-[0-9]+\b").unwrap());
 
 /// One expectation of the ticket and how it was proven.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     /// The expectation's id, such as "E1".
     pub id: String,
@@ -35,7 +35,7 @@ impl Item {
 }
 
 /// A ticket's evidence set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     /// The ticket key, such as "CASBO-1055".
     pub ticket: String,
