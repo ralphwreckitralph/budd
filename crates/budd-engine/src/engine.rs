@@ -35,6 +35,9 @@ use std::sync::Arc;
 pub struct ClientId(pub u64);
 
 /// A line for a client: a reply to one of them, or an event for every subscriber of its topic.
+// An event may carry the whole state file; each line is built once and serialized, so the size
+// difference is not worth a Box.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outgoing {
     /// The answer to one client's request.
