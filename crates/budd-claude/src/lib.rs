@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod gate;
 pub mod hookrun;
 pub mod ipc;
+pub mod kit;
 pub mod mcp_stdio;
 pub mod messenger;
 pub mod paths;

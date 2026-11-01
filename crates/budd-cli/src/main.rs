@@ -4,12 +4,14 @@
 
 use budd_claude::claude_cli::{self, Claude};
 use budd_claude::doctor;
+use budd_claude::kit::{self, evidence, expect, fingerprint, handover};
 use budd_claude::messenger::{self, Message, Outcome, Target, Via};
 use budd_claude::paths::BuddHome;
 use budd_claude::setup::{self, ConnectOptions, Terminal};
 use budd_core::delivery::PathStyle;
 use budd_proto::{Command as DaemonCommand, Request};
 use clap::{Parser, Subcommand};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -177,6 +179,166 @@ enum Command {
         /// The `claude` binary, instead of the one Budd finds.
         #[arg(long, value_name = "EXE")]
         claude: Option<PathBuf>,
+    },
+    /// The evidence set of a ticket: each expectation, how it was proven, and its BEFORE and AFTER frames.
+    ///
+    /// Sets live at `<config dir>/evidence/<TICKET>/`, where the config dir is `CLAUDE_CONFIG_DIR`, else
+    /// Budd's own `<home>/claude`. Exits 0 ok, 1 with gaps (check), 2 on a usage or input error.
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommand,
+        /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
+        #[arg(long, global = true, value_name = "DIR")]
+        home: Option<PathBuf>,
+    },
+    /// The per-worktree handover document, kept under the worktree's git dir where no commit can carry it.
+    Handover {
+        #[command(subcommand)]
+        command: HandoverCommand,
+        /// The worktree (or a folder inside it); the current folder when not given.
+        #[arg(long, global = true, visible_alias = "repo", value_name = "DIR")]
+        worktree: Option<PathBuf>,
+        /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
+        #[arg(long, global = true, value_name = "DIR")]
+        home: Option<PathBuf>,
+    },
+    /// The expectation document's shape: Problems, Expected, Potential risk, one sentence per bullet.
+    Expect {
+        #[command(subcommand)]
+        command: ExpectCommand,
+    },
+    /// The fingerprint of a working tree: its git tree oid with untracked files in and build output out.
+    ///
+    /// Computed in a throwaway index, so the real index is never touched. Prints the oid, or exits 1.
+    Fingerprint {
+        /// The repository, or a folder inside it; the current folder when not given.
+        #[arg(value_name = "REPO")]
+        repo: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvidenceCommand {
+    /// Start the set (or re-sync it with the document) from the `expectations.json` sidecar.
+    Init {
+        /// The ticket key.
+        ticket: String,
+        /// The sidecar `budd expect sidecar` wrote.
+        #[arg(long, value_name = "FILE")]
+        expectations: PathBuf,
+    },
+    /// Say whether a screen shows the expectation.
+    Screen {
+        /// The ticket key.
+        ticket: String,
+        /// The expectation id, such as E1.
+        id: String,
+        /// yes or no.
+        answer: String,
+    },
+    /// Copy a BEFORE or AFTER frame into the set.
+    Add {
+        /// The ticket key.
+        ticket: String,
+        /// The expectation id, such as E1.
+        id: String,
+        /// before or after.
+        when: String,
+        /// The image (png, jpg, jpeg, gif or webp).
+        image: PathBuf,
+        /// The page the frame shows.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// What was done on the page before the frame.
+        #[arg(long, value_name = "TEXT")]
+        steps: Option<String>,
+        /// The recipe that took it, kept as E<n>.recipe.mjs for the AFTER replay.
+        #[arg(long, value_name = "FILE")]
+        recipe: Option<PathBuf>,
+    },
+    /// Record the test or check that proves the expectation.
+    Proof {
+        /// The ticket key.
+        ticket: String,
+        /// The expectation id, such as E1.
+        id: String,
+        /// The proof.
+        text: String,
+    },
+    /// Name every gap; exits 1 when there is one.
+    Check {
+        /// The ticket key.
+        ticket: String,
+    },
+    /// List each expectation with its frames and proof.
+    Show {
+        /// The ticket key.
+        ticket: String,
+    },
+    /// Take a frame headless: only with the evidence-shots module, which this build does not have.
+    Shoot {
+        /// Its arguments, which this build does not read.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HandoverCommand {
+    /// Print the handover folder: `<git dir>/budd-handover`.
+    Home,
+    /// Write a section, replacing the one with the same heading; the body comes from --from or stdin.
+    Append {
+        /// The section's title.
+        #[arg(value_name = "SECTION", required_unless_present = "title")]
+        section: Option<String>,
+        /// The section's title, as --title.
+        #[arg(long, conflicts_with = "section", value_name = "TITLE")]
+        title: Option<String>,
+        /// The skill writing it, heading the section as `<skill> - <title>`.
+        #[arg(long, value_name = "NAME")]
+        skill: Option<String>,
+        /// Read the body from this file instead of stdin.
+        #[arg(long, visible_alias = "body-file", value_name = "FILE")]
+        from: Option<PathBuf>,
+        /// Stamp this session's token usage into the section (an id, or a transcript path).
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// Print the document, each section marked CURRENT or SUPERSEDED against the live tree.
+    Show {
+        /// Only this section (its title, or its full heading).
+        #[arg(value_name = "SECTION")]
+        section: Option<String>,
+    },
+    /// Print a session's token usage, as a section would carry it.
+    Tokens {
+        /// The session id, or a transcript path.
+        #[arg(value_name = "SESSION")]
+        session: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExpectCommand {
+    /// Check the document; exit 0 is the only pass.
+    Check {
+        /// The document.
+        file: PathBuf,
+        /// Print the findings as a JSON list.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check the document and write the acceptance sidecar, one item per Expected bullet as E1..En.
+    Sidecar {
+        /// The document.
+        file: PathBuf,
+        /// The ticket the sidecar is for.
+        #[arg(long, value_name = "KEY")]
+        ticket: Option<String>,
+        /// Where to write `expectations.json`.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
     },
 }
 
@@ -364,6 +526,193 @@ fn run_watch(home: Option<PathBuf>) -> Result<(), String> {
         })
 }
 
+/// The Claude config folder the kit's state lives under.
+fn kit_config_dir(home: Option<PathBuf>) -> Result<PathBuf, String> {
+    Ok(kit::config_dir(&budd_home(home)?))
+}
+
+fn run_evidence(command: EvidenceCommand, home: Option<PathBuf>) -> ExitCode {
+    let command = match command {
+        EvidenceCommand::Init { ticket, expectations } => evidence::Command::Init { ticket, expectations },
+        EvidenceCommand::Screen { ticket, id, answer } => evidence::Command::Screen { ticket, id, answer },
+        EvidenceCommand::Add {
+            ticket,
+            id,
+            when,
+            image,
+            url,
+            steps,
+            recipe,
+        } => evidence::Command::Add {
+            ticket,
+            id,
+            when,
+            image,
+            url,
+            steps,
+            recipe,
+        },
+        EvidenceCommand::Proof { ticket, id, text } => evidence::Command::Proof { ticket, id, text },
+        EvidenceCommand::Check { ticket } => evidence::Command::Check { ticket },
+        EvidenceCommand::Show { ticket } => evidence::Command::Show { ticket },
+        EvidenceCommand::Shoot { rest: _ } => evidence::Command::Shoot,
+    };
+    let outcome = kit_config_dir(home).and_then(|config_dir| {
+        let mut out = std::io::stdout().lock();
+        let code = evidence::run(&config_dir, &command, &mut out).map_err(|why| why.to_string());
+        let _ = out.flush();
+        code
+    });
+    match outcome {
+        Ok(code) => ExitCode::from(code as u8),
+        Err(why) => {
+            eprintln!("evidence: {why}");
+            eprintln!("{}", evidence::USAGE);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_handover(command: HandoverCommand, worktree: Option<PathBuf>, home: Option<PathBuf>) -> ExitCode {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let worktree = worktree.unwrap_or_else(|| cwd.clone());
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let tokens_of = |session: Option<&str>| -> Result<handover::TokenFacts, String> {
+        match session.filter(|s| !s.is_empty()) {
+            Some(session) => Ok(handover::token_facts(
+                &kit_config_dir(home.clone())?,
+                session,
+                &cwd_text,
+            )),
+            None => Ok(handover::TokenFacts::none()),
+        }
+    };
+    let result: Result<(), (i32, String)> = (|| {
+        let open = || handover::Handover::open(&worktree).map_err(|error| (error.exit_code(), error.to_string()));
+        match command {
+            HandoverCommand::Home => {
+                println!("{}", open()?.home().display());
+                Ok(())
+            }
+            HandoverCommand::Append {
+                section,
+                title,
+                skill,
+                from,
+                session,
+            } => {
+                let handover = open()?;
+                let title = title.or(section).unwrap_or_default();
+                let body = match from {
+                    Some(file) => std::fs::read_to_string(&file)
+                        .map_err(|error| (2, format!("append: --from {}: {error}", file.display())))?,
+                    None => {
+                        let mut body = String::new();
+                        let mut stdin = std::io::stdin();
+                        if !stdin.is_terminal() {
+                            stdin
+                                .read_to_string(&mut body)
+                                .map_err(|error| (2, format!("append: reading stdin: {error}")))?;
+                        }
+                        body
+                    }
+                };
+                let tokens = tokens_of(session.as_deref()).map_err(|why| (2, why))?;
+                let section = handover::NewSection {
+                    skill: skill.as_deref(),
+                    title: &title,
+                    body: &body,
+                };
+                let document = handover
+                    .append(&section, &tokens, &kit::Utc::now())
+                    .map_err(|error| (error.exit_code(), error.to_string()))?;
+                println!("{}", document.display());
+                Ok(())
+            }
+            HandoverCommand::Show { section } => {
+                let handover = open()?;
+                let mut out = std::io::stdout().lock();
+                handover
+                    .show(section.as_deref(), &mut out)
+                    .map_err(|error| (error.exit_code(), error.to_string()))?;
+                let _ = out.flush();
+                Ok(())
+            }
+            HandoverCommand::Tokens { session } => {
+                let facts = tokens_of(Some(&session)).map_err(|why| (2, why))?;
+                print!("{}", facts.lines());
+                Ok(())
+            }
+        }
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((code, why)) => {
+            eprintln!("budd handover: {why}");
+            ExitCode::from(code as u8)
+        }
+    }
+}
+
+fn run_expect(command: ExpectCommand) -> ExitCode {
+    let (file, json, sidecar) = match command {
+        ExpectCommand::Check { file, json } => (file, json, None),
+        ExpectCommand::Sidecar { file, ticket, out } => (file, false, Some((ticket, out))),
+    };
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("cannot read {}: {error}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+    let found = expect::validate(&text);
+    if json {
+        println!("{}", serde_json::Value::from(found.errors.clone()));
+    } else {
+        for error in &found.errors {
+            println!("FAIL {error}");
+        }
+    }
+    if !found.ok() {
+        return ExitCode::FAILURE;
+    }
+    if !json {
+        println!("{}", found.summary());
+    }
+    if let Some((ticket, out)) = sidecar {
+        let written = expect::encode_sidecar(&found.sidecar(ticket.as_deref()))
+            .map_err(|error| error.to_string())
+            .and_then(|text| {
+                // The handover folder it goes in may not exist before its first section.
+                if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                }
+                std::fs::write(&out, text).map_err(|error| error.to_string())
+            });
+        if let Err(error) = written {
+            eprintln!("cannot write {}: {error}", out.display());
+            return ExitCode::from(2);
+        }
+        println!("sidecar: {} (E1..E{})", out.display(), found.expected.len());
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_fingerprint(repo: Option<PathBuf>) -> ExitCode {
+    let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+    match fingerprint::fingerprint(&repo) {
+        Ok(oid) => {
+            println!("{oid}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("budd fingerprint: {}: {error}", repo.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -453,6 +802,14 @@ fn main() -> ExitCode {
             };
             report(claude_at(claude, config_dir).map(|claude| messenger::clear(&claude, &target)))
         }
+        Command::Evidence { command, home } => run_evidence(command, home),
+        Command::Handover {
+            command,
+            worktree,
+            home,
+        } => run_handover(command, worktree, home),
+        Command::Expect { command } => run_expect(command),
+        Command::Fingerprint { repo } => run_fingerprint(repo),
     }
 }
 
