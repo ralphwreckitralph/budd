@@ -179,6 +179,8 @@ enum Msg {
     Account(Result<budd_core::account::AccountStatus, String>),
     Config(Result<budd_claude::config::Config, String>),
     Completion(Completion),
+    /// The process was told to stop (SIGTERM, SIGINT or Ctrl-C), so the lock and the advert go cleanly.
+    Signal(&'static str),
 }
 
 /// Runs the daemon until a client asks it to shut down. Blocks the calling task for its whole life.
@@ -339,6 +341,12 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
     });
 
+    // The stop signals, so launchd, the app or a Ctrl-C end the daemon with its lock and advert removed.
+    let signal_tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = signal_tx.send(Msg::Signal(stop_signal().await));
+    });
+
     // The engine's loop.
     let mut clients = Clients::new();
     while let Some(message) = rx.recv().await {
@@ -355,6 +363,10 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             Msg::Account(status) => engine.on_account(status),
             Msg::Config(file) => engine.on_config(file),
             Msg::Completion(completion) => engine.complete(completion),
+            Msg::Signal(name) => {
+                tracing::info!("shutting down on {name}");
+                break;
+            }
         }
         let _ = cadence_tx.send_replace(engine.cadence());
         for outgoing in engine.take_outgoing() {
@@ -375,6 +387,31 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
     }
     Ok(())
+}
+
+/// Waits for a signal that means stop, and says which: SIGTERM or SIGINT on Unix, Ctrl-C elsewhere.
+async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM cannot be watched; only Ctrl-C stops the daemon cleanly");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
 }
 
 /// When the file at `path` was last written and how long it is, or `None` when it is not there: what

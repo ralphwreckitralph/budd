@@ -367,6 +367,14 @@ fn run_dir_mode(dir: &Path) -> Option<u32> {
     dir.is_dir().then_some(0o700)
 }
 
+/// The pid of the daemon running for `home`, when `run/daemon.json` names a live process.
+pub fn running_daemon(home: &BuddHome) -> Option<u32> {
+    let text = std::fs::read_to_string(home.run_dir().join("daemon.json")).ok()?;
+    let advert: Value = serde_json::from_str(&text).ok()?;
+    let pid = advert.get("pid").and_then(Value::as_u64).map(|pid| pid as u32)?;
+    procs::is_alive(pid).then_some(pid)
+}
+
 /// The daemon is running: `run/daemon.json` names a live process.
 pub fn check_daemon(ctx: &Context) -> Check {
     let path = ctx.home.run_dir().join("daemon.json");
