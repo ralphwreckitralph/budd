@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Budd card</title>
+    <link rel="stylesheet" href="/src/card.css" />
+  </head>
+  <body>
+    <div class="card" role="dialog" aria-label="Message Budd">
+      <header>
+        <span class="name">Budd</span>
+        <button id="close" type="button">Close</button>
+      </header>
+      <textarea id="compose" placeholder="Message Budd" rows="6" spellcheck="true"></textarea>
+      <footer>Esc closes the card and gives the keyboard back.</footer>
+    </div>
+    <script type="module" src="/src/card.ts"></script>
+  </body>
+</html>

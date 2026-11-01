@@ -1,0 +1,72 @@
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("/fonts/Nunito-700.woff2") format("woff2");
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The tab and the drawer slide together inside the fixed window: shut, the drawer sits past the
+   window's right edge, which is the screen's, and only the tab shows. */
+.office {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 326px;
+  height: 100%;
+  transform: translateX(300px);
+  transition: transform 0.25s ease-out;
+}
+
+.office.open {
+  transform: translateX(0);
+}
+
+/* The window has no system shadow; these cast one for the two left-rounded shapes. */
+.shadow {
+  position: absolute;
+  border-radius: 14px 0 0 14px;
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.45),
+    0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+.tab-shadow {
+  left: 0;
+  width: 26px;
+  height: 76px;
+}
+
+.drawer-shadow {
+  left: 26px;
+  top: 0;
+  width: 300px;
+  height: 100%;
+  visibility: hidden;
+}
+
+.office.open .drawer-shadow,
+.office.sliding .drawer-shadow {
+  visibility: visible;
+}
+
+canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 326px;
+  height: 100%;
+  display: block;
+}
