@@ -1,0 +1,6 @@
+# The Claude Code versions Budd supports.
+# minimum: below this Budd refuses to connect and asks for `claude update`.
+# tested: the newest version the release's e2e suite ran against; newer versions only get a notice.
+[claude]
+minimum = "2.1.300"
+tested = "2.1.316"

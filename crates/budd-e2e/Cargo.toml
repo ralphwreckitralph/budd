@@ -1,0 +1,10 @@
+[package]
+name = "budd-e2e"
+description = "Integration tests that drive the daemon against fake-claude, or real Claude Code when asked."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

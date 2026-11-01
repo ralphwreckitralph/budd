@@ -1,0 +1,10 @@
+[package]
+name = "budd-proto"
+description = "The IPC schema between the Budd daemon and its clients (app, CLI, hook, MCP)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

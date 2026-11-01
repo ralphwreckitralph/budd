@@ -1,0 +1,10 @@
+[package]
+name = "budd-office"
+description = "The office UI state machine: seats, calls, attention, card priority. No rendering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

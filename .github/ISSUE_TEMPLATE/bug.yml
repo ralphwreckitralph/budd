@@ -1,0 +1,30 @@
+name: Bug report
+description: Something in Budd went wrong
+body:
+  - type: textarea
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Output of `budd doctor`
+      render: text
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: OS and version
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Claude Code version (`claude --version`)
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no credentials, tokens or e-mail addresses
+          required: true
