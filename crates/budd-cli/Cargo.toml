@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 budd-core = { path = "../budd-core" }
 budd-claude = { path = "../budd-claude" }
+budd-engine = { path = "../budd-engine" }
+budd-proto = { path = "../budd-proto" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"

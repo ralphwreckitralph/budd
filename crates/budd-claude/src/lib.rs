@@ -10,3 +10,6 @@ pub mod mcp_stdio;
 pub mod paths;
 pub mod procs;
 pub mod state_files;
+pub mod messenger;
+pub mod pty;
+pub mod watch;
