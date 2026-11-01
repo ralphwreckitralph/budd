@@ -8,3 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = "1"
+fancy-regex = "0.14"
+thiserror = "2"
+unicode-segmentation = "1"
