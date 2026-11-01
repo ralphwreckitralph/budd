@@ -5,6 +5,9 @@
 //! real host, [`RealHost`], is `budd_claude` behind the trait.
 
 use budd_claude::claude_cli::Claude;
+use budd_claude::config::Config as FileConfig;
+use budd_claude::crew as launcher;
+use budd_claude::doctor::{self, Check};
 use budd_claude::hookrun::transcript_io::{FsTranscriptStore, locate_transcript};
 use budd_claude::messenger;
 use budd_claude::procs;
@@ -67,19 +70,44 @@ pub trait ClaudeHost: TranscriptStore + Send + Sync + 'static {
     fn now(&self) -> f64;
     /// The transcripts, for following and for history.
     fn transcripts(&self) -> &dyn TranscriptStore;
+    /// `folder` as a crew folder: its real path when it is a git repository and not `assistant_dir`,
+    /// else why not (`budd_claude::crew::check_folder`).
+    fn check_crew_folder(&self, folder: &Path, assistant_dir: &Path) -> Result<PathBuf, String>;
+    /// The permission mode Budd's config folder names as its default.
+    fn permission_mode(&self) -> String;
+    /// Makes Budd's config folder trust `folder`, so a session started there does not wait on the question.
+    fn trust_folder(&self, folder: &Path) -> Result<(), String>;
+    /// The settings file at `path`, defaults filled in; a missing file is the defaults.
+    fn load_config(&self, path: &Path) -> Result<FileConfig, String>;
+    /// Writes the settings file at `path`.
+    fn save_config(&self, path: &Path, config: &FileConfig) -> Result<(), String>;
+    /// The doctor's checks.
+    fn doctor(&self) -> Vec<Check>;
 }
 
 /// The machine as it is: `budd_claude` behind the trait.
 pub struct RealHost {
     claude: Claude,
     store: FsTranscriptStore,
+    doctor: Option<doctor::Context>,
 }
 
 impl RealHost {
     /// A host running `claude` against `config_dir`.
     pub fn new(claude: Claude) -> RealHost {
         let store = FsTranscriptStore::new(claude.config_dir.clone());
-        RealHost { claude, store }
+        RealHost {
+            claude,
+            store,
+            doctor: None,
+        }
+    }
+
+    /// The same host, answering `doctor` with the checks over `context`; without one it answers with
+    /// a single line saying the daemon cannot run them.
+    pub fn with_doctor(mut self, context: doctor::Context) -> RealHost {
+        self.doctor = Some(context);
+        self
     }
 
     /// The binary and config folder.
@@ -171,6 +199,38 @@ impl ClaudeHost for RealHost {
     fn transcripts(&self) -> &dyn TranscriptStore {
         self
     }
+
+    fn check_crew_folder(&self, folder: &Path, assistant_dir: &Path) -> Result<PathBuf, String> {
+        launcher::check_folder(folder, assistant_dir).map_err(|error| error.to_string())
+    }
+
+    fn permission_mode(&self) -> String {
+        launcher::permission_mode(&self.claude.config_dir)
+    }
+
+    fn trust_folder(&self, folder: &Path) -> Result<(), String> {
+        launcher::ensure_trusted(&self.claude.config_dir, folder)
+            .map(|_| ())
+            .map_err(|error| format!("trusting {} in Budd's .claude.json: {error}", folder.display()))
+    }
+
+    fn load_config(&self, path: &Path) -> Result<FileConfig, String> {
+        FileConfig::load(path).map_err(|error| error.to_string())
+    }
+
+    fn save_config(&self, path: &Path, config: &FileConfig) -> Result<(), String> {
+        config.save(path).map_err(|error| error.to_string())
+    }
+
+    fn doctor(&self) -> Vec<Check> {
+        match &self.doctor {
+            Some(context) => doctor::run(context),
+            None => vec![Check::warn(
+                "doctor",
+                "this daemon was started without a doctor context",
+            )],
+        }
+    }
 }
 
 /// A host held in memory, for tests: sessions, transcripts, jobs and a clock set by hand, and a record
@@ -192,6 +252,8 @@ pub mod mock {
         Send(String, String, Vec<String>),
         /// `clear(target.short_id)`.
         Clear(String),
+        /// `trust_folder(folder)`.
+        Trust(PathBuf),
     }
 
     /// What the mock holds.
@@ -207,6 +269,9 @@ pub mod mock {
         now: f64,
         send_outcome: Outcome,
         stop_fails: bool,
+        start_fails: Option<String>,
+        repositories: HashSet<PathBuf>,
+        permission_mode: String,
         did: Vec<Did>,
     }
 
@@ -239,6 +304,9 @@ pub mod mock {
                     now: 1000.0,
                     send_outcome: Outcome::Delivered,
                     stop_fails: false,
+                    start_fails: None,
+                    repositories: HashSet::new(),
+                    permission_mode: "default".to_owned(),
                     did: Vec::new(),
                 }),
             }
@@ -347,6 +415,23 @@ pub mod mock {
             self.with(|inner| inner.stop_fails = fails);
         }
 
+        /// Makes every start fail with `reason`, or succeed again with `None`.
+        pub fn set_start_fails(&self, reason: Option<&str>) {
+            self.with(|inner| inner.start_fails = reason.map(str::to_owned));
+        }
+
+        /// Makes `folder` a git repository as far as `check_crew_folder` is concerned.
+        pub fn add_repository(&self, folder: &Path) {
+            self.with(|inner| {
+                inner.repositories.insert(folder.to_path_buf());
+            });
+        }
+
+        /// Sets the permission mode Budd's folder defaults to.
+        pub fn set_permission_mode(&self, mode: &str) {
+            self.with(|inner| inner.permission_mode = mode.to_owned());
+        }
+
         /// Everything the engine did, in order, and forgets it.
         pub fn take_did(&self) -> Vec<Did> {
             self.with(|inner| std::mem::take(&mut inner.did))
@@ -405,7 +490,10 @@ pub mod mock {
         fn start_bg(&self, cwd: &Path, argv: &[String]) -> Result<Vec<String>, String> {
             self.with(|inner| {
                 inner.did.push(Did::Start(cwd.to_path_buf(), argv.to_vec()));
-                Ok(vec!["Started background session".to_owned()])
+                match &inner.start_fails {
+                    Some(reason) => Err(reason.clone()),
+                    None => Ok(vec!["Started background session".to_owned()]),
+                }
             })
         }
 
@@ -456,6 +544,43 @@ pub mod mock {
 
         fn transcripts(&self) -> &dyn TranscriptStore {
             self
+        }
+
+        fn check_crew_folder(&self, folder: &Path, assistant_dir: &Path) -> Result<PathBuf, String> {
+            if folder == assistant_dir {
+                return Err(format!(
+                    "crew never run in the assistant's own folder ({})",
+                    folder.display()
+                ));
+            }
+            self.with(|inner| {
+                if inner.repositories.contains(folder) {
+                    Ok(folder.to_path_buf())
+                } else {
+                    Err(format!("{} is not a git repository", folder.display()))
+                }
+            })
+        }
+
+        fn permission_mode(&self) -> String {
+            self.with(|inner| inner.permission_mode.clone())
+        }
+
+        fn trust_folder(&self, folder: &Path) -> Result<(), String> {
+            self.with(|inner| inner.did.push(Did::Trust(folder.to_path_buf())));
+            Ok(())
+        }
+
+        fn load_config(&self, path: &Path) -> Result<FileConfig, String> {
+            FileConfig::load(path).map_err(|error| error.to_string())
+        }
+
+        fn save_config(&self, path: &Path, config: &FileConfig) -> Result<(), String> {
+            config.save(path).map_err(|error| error.to_string())
+        }
+
+        fn doctor(&self) -> Vec<Check> {
+            vec![Check::ok("mock", "a host held in memory")]
         }
     }
 }

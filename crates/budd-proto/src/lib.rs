@@ -140,13 +140,14 @@ pub enum Command {
         #[serde(default)]
         force: bool,
     },
-    /// Starts one crew session per ticket key typed. Not yet served.
+    /// Starts one crew session per ticket key typed, in the project its prefix belongs to, named after
+    /// the key. Nothing starts while any prefix is unclaimed. Answered with [`StartReply`].
     #[serde(rename = "start_tickets")]
     StartTickets {
         /// What the human typed, holding the keys.
         text: String,
     },
-    /// Starts a crew session by name with a brief. Not yet served.
+    /// Starts a crew session by name with a brief. Answered with [`StartReply`].
     #[serde(rename = "crew.start")]
     CrewStart {
         /// The session's name.
@@ -165,7 +166,8 @@ pub enum Command {
         #[serde(default)]
         chrome: bool,
     },
-    /// Starts an office chat with a message. Not yet served.
+    /// Starts an office chat: a session in the assistant's folder named after the message's first
+    /// words, which gets the message once it is listed. Answered with [`ChatReply`].
     #[serde(rename = "chat")]
     Chat {
         /// The first message.
@@ -229,6 +231,20 @@ pub enum Command {
     /// The daemon's settings. Answered with [`Settings`].
     #[serde(rename = "settings.get")]
     SettingsGet,
+    /// Changes `config.json`: `patch` is laid over the file (objects merge key by key, `null` removes,
+    /// anything else replaces), the result is written and applied. Answered with [`Settings`].
+    #[serde(rename = "settings.set")]
+    SettingsSet {
+        /// The partial config.
+        patch: Value,
+    },
+    /// Runs the doctor's checks. Answered with [`DoctorReply`].
+    #[serde(rename = "doctor.run")]
+    DoctorRun,
+    /// Forgets what Budd learned while running (unread replies, asks seen, autopilot's answers, the
+    /// mode) and stops the assistant so it starts over; the config stays. Answered with a bare `ok`.
+    #[serde(rename = "reset")]
+    Reset,
     /// Stops the daemon.
     #[serde(rename = "shutdown")]
     Shutdown,
@@ -386,6 +402,37 @@ pub struct ArchiveReply {
     pub asks_first: bool,
 }
 
+/// The reply to `start_tickets` and `crew.start`: the sessions started, and the ones `claude --bg`
+/// refused, each as "name: reason".
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StartReply {
+    /// The names started, in the order asked.
+    pub started: Vec<String>,
+    /// What could not start, as "name: reason".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
+}
+
+/// The reply to `chat`: the chat's name, and whether its first message arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatReply {
+    /// The session's name, such as "chat-where-is-the-dev".
+    pub name: String,
+    /// The message showed up in its transcript.
+    pub delivered: bool,
+    /// Why it could not be confirmed, when it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The reply to `doctor.run`: one entry per check, each `{name, state, detail}` with `state` one of
+/// "ok", "warn", "fail".
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DoctorReply {
+    /// The checks, in the report's order.
+    pub checks: Vec<Value>,
+}
+
 /// The reply to `history.page`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryReply {
@@ -417,6 +464,9 @@ pub struct Settings {
     pub claude: Option<String>,
     /// The daemon's version.
     pub version: String,
+    /// The whole `config.json` as the daemon has it, with the defaults filled in.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub config: Value,
 }
 
 /// What a crew member's transcript says about where it is, as the wire carries it.
@@ -874,6 +924,14 @@ mod tests {
                 "tool.call",
             ),
             (Command::SettingsGet, "settings.get"),
+            (
+                Command::SettingsSet {
+                    patch: json!({"sounds": false}),
+                },
+                "settings.set",
+            ),
+            (Command::DoctorRun, "doctor.run"),
+            (Command::Reset, "reset"),
             (Command::Shutdown, "shutdown"),
         ];
         for (command, name) in commands {

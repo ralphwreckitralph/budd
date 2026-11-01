@@ -164,9 +164,39 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Writes `bytes` to a temporary file beside `path` and renames it into place, creating the folder
+/// first, so a reader never sees half a file.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&parent)?;
+    let mut file = tempfile::Builder::new().prefix(".tmp-").tempfile_in(&parent)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_atomic_write_leaves_the_file_and_nothing_else() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("deep").join("file.json");
+        write_atomically(&path, b"one").unwrap();
+        write_atomically(&path, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["file.json"]);
+    }
 
     #[test]
     fn budd_home_overrides_the_home_directory() {

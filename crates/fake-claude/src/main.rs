@@ -17,6 +17,14 @@
 //!   is unknown and exits 1; with `FAKE_CLAUDE_NO_PROMPT=hang` it prints a line and never a prompt.
 //!   It exits when stdin closes, or on SIGTERM.
 //! - `fake-claude stop <id>` prints "stopped <id>".
+//! - `fake-claude auth status --json` prints the JSON in the file `FAKE_CLAUDE_AUTH` names, exiting 1
+//!   when it says `"loggedIn": false`, as the real one does; without the file it is logged out.
+//!   `auth logout` rewrites that file as logged out.
+//! - `fake-claude mcp get|add|remove` keep user-scope servers in `mcp.json` in `CLAUDE_CONFIG_DIR`, and
+//!   `get` prints them the way the real one does (Command and Args lines).
+//! - `fake-claude --bg ...` prints "Started background session" and appends the folder and arguments
+//!   as one line to the file `FAKE_CLAUDE_STARTED` names; it refuses with "Workspace not trusted" when
+//!   `FAKE_CLAUDE_TRUST=1` and `.claude.json` in the config folder does not trust the folder.
 //!
 //! Budd starts `claude` with a scrubbed environment, so each setting is read from the environment first
 //! and then from `fake-claude.env` in `CLAUDE_CONFIG_DIR`, one `NAME=value` per line.
@@ -47,6 +55,10 @@ fn main() -> ExitCode {
             println!("stopped {id}");
             ExitCode::SUCCESS
         }
+        ["auth", "status", ..] => auth_status(),
+        ["auth", "logout", ..] => auth_logout(),
+        ["mcp", rest @ ..] => mcp(rest),
+        ["--bg", rest @ ..] => start_bg(rest),
         _ => {
             eprintln!("fake-claude: unknown command: {}", words.join(" "));
             ExitCode::from(2)
@@ -98,6 +110,138 @@ fn agents() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Who the folder is logged in as, from the auth file; exit 1 when logged out, as the real one.
+fn auth_status() -> ExitCode {
+    let logged_out = serde_json::json!({"loggedIn": false, "authMethod": "none"});
+    let status = setting("FAKE_CLAUDE_AUTH")
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or(logged_out);
+    println!("{status}");
+    if status.get("loggedIn").and_then(|v| v.as_bool()) == Some(true) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Logs the folder out: the auth file says so from now on.
+fn auth_logout() -> ExitCode {
+    if let Some(path) = setting("FAKE_CLAUDE_AUTH") {
+        let _ = fs::write(
+            path,
+            serde_json::json!({"loggedIn": false, "authMethod": "none"}).to_string(),
+        );
+    }
+    println!("Logged out");
+    ExitCode::SUCCESS
+}
+
+/// Where the user-scope MCP servers are kept.
+fn mcp_file() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR").map(|dir| PathBuf::from(dir).join("mcp.json"))
+}
+
+/// `mcp get <name>`, `mcp add -s user <name> -- <command> <args...>`, `mcp remove -s user <name>`.
+fn mcp(words: &[&str]) -> ExitCode {
+    let Some(file) = mcp_file() else {
+        eprintln!("fake-claude: CLAUDE_CONFIG_DIR is not set");
+        return ExitCode::from(1);
+    };
+    let mut servers: serde_json::Map<String, serde_json::Value> = fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let flagless: Vec<&str> = {
+        let mut out = Vec::new();
+        let mut skip = false;
+        for word in words {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if *word == "-s" || *word == "--scope" {
+                skip = true;
+                continue;
+            }
+            out.push(*word);
+        }
+        out
+    };
+    match flagless.as_slice() {
+        ["get", name] => match servers.get(*name) {
+            Some(server) => {
+                let args: Vec<String> = server["args"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                println!(
+                    "{name}:\n  Scope: User config\n  Status: ✓ Connected\n  Type: stdio\n  Command: {}\n  Args: {}",
+                    server["command"].as_str().unwrap_or(""),
+                    args.join(" ")
+                );
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("No MCP server found with name: {name}");
+                ExitCode::from(1)
+            }
+        },
+        ["add", name, "--", command, args @ ..] => {
+            servers.insert(
+                (*name).to_owned(),
+                serde_json::json!({"command": command, "args": args}),
+            );
+            let _ = fs::write(&file, serde_json::Value::Object(servers).to_string());
+            println!("Added stdio MCP server {name} to user config");
+            ExitCode::SUCCESS
+        }
+        ["remove", name] => {
+            if servers.remove(*name).is_none() {
+                eprintln!("No MCP server found with name: {name}");
+                return ExitCode::from(1);
+            }
+            let _ = fs::write(&file, serde_json::Value::Object(servers).to_string());
+            println!("Removed MCP server {name} from user config");
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("fake-claude: unknown mcp command: {}", words.join(" "));
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `--bg ...`: records the start, or refuses an untrusted folder when asked to behave like that.
+fn start_bg(words: &[&str]) -> ExitCode {
+    let cwd = std::env::current_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if setting("FAKE_CLAUDE_TRUST").as_deref() == Some("1") {
+        let trusted = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .and_then(|dir| fs::read_to_string(PathBuf::from(dir).join(".claude.json")).ok())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| value["projects"][cwd.as_str()]["hasTrustDialogAccepted"].as_bool())
+            .unwrap_or(false);
+        if !trusted {
+            eprintln!("Workspace not trusted: {cwd}");
+            return ExitCode::from(1);
+        }
+    }
+    if let Some(path) = setting("FAKE_CLAUDE_STARTED")
+        && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = writeln!(file, "{cwd}\t--bg {}", words.join(" "));
+    }
+    let name = words
+        .windows(2)
+        .find(|pair| pair[0] == "--name")
+        .map(|pair| pair[1])
+        .unwrap_or("session");
+    println!("Started background session {name} (a1b2c3d4)");
+    ExitCode::SUCCESS
 }
 
 /// The attached client: a prompt, and a transcript entry for every pasted message.

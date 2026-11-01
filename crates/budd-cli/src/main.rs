@@ -3,11 +3,19 @@
 //! Subcommands land here as the adapters behind them land in `budd_claude` and `budd_engine`.
 
 use budd_claude::claude_cli::{self, Claude};
+use budd_claude::doctor;
 use budd_claude::messenger::{self, Message, Outcome, Target, Via};
+use budd_claude::paths::BuddHome;
+use budd_claude::setup::{self, ConnectOptions, Terminal};
 use budd_core::delivery::PathStyle;
+use budd_proto::{Command as DaemonCommand, Request};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
+
+/// How long `budd reset` gives the daemon to forget and stop the assistant.
+const RESET_WAIT: Duration = Duration::from_secs(30);
 
 /// Budd: an office for your Claude Code background sessions.
 #[derive(Parser)]
@@ -44,6 +52,69 @@ enum Command {
         /// The `claude` binary, instead of the one found.
         #[arg(long, value_name = "PATH")]
         claude: Option<PathBuf>,
+    },
+    /// Checks the install: claude, Budd's account, the hooks, the MCP server, the endpoint, the daemon.
+    ///
+    /// Exits 0 when nothing failed, 1 when something must be fixed before Budd works.
+    Doctor {
+        /// Print the checks as JSON, one object per check.
+        #[arg(long)]
+        json: bool,
+        /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        /// The `claude` binary, instead of the one found.
+        #[arg(long, value_name = "PATH")]
+        claude: Option<PathBuf>,
+    },
+    /// Prepares Budd's home: the folders, the hooks, the MCP server, the assistant's persona, config.json.
+    ///
+    /// Safe to run again: what is already right is kept, and the human's own edits stay.
+    Setup {
+        /// Say what would be done without doing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        /// The `claude` binary, instead of the one found.
+        #[arg(long, value_name = "PATH")]
+        claude: Option<PathBuf>,
+    },
+    /// Logs Budd's own Claude folder in to claude.ai, in a terminal window, and waits for it.
+    Connect {
+        /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        /// The `claude` binary, instead of the one found.
+        #[arg(long, value_name = "PATH")]
+        claude: Option<PathBuf>,
+        /// Where the login opens: "terminal" (the platform's) or "iterm".
+        #[arg(long, value_name = "NAME", default_value = "terminal")]
+        terminal: String,
+        /// How many seconds to wait for the login.
+        #[arg(long, value_name = "SECONDS", default_value_t = setup::LOGIN_WAIT.as_secs())]
+        wait: u64,
+        /// A Claude config folder (usually ~/.claude) whose trusted folders Budd's folder takes on.
+        #[arg(long, value_name = "DIR")]
+        carry_trust_from: Option<PathBuf>,
+        /// A Claude config folder whose memory for the assistant's folder is copied over, once.
+        #[arg(long, value_name = "DIR")]
+        import_memory_from: Option<PathBuf>,
+    },
+    /// Forgets what Budd learned while running and stops the assistant, so he starts over.
+    ///
+    /// The config, Budd's Claude folder and its login stay, unless `--sign-out` is given.
+    Reset {
+        /// Budd's home folder, instead of `BUDD_HOME` or `~/.budd`.
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+        /// The `claude` binary, instead of the one found.
+        #[arg(long, value_name = "PATH")]
+        claude: Option<PathBuf>,
+        /// Also log Budd's Claude folder out.
+        #[arg(long)]
+        sign_out: bool,
     },
     /// Connects to the daemon and prints every line it sends, as JSON.
     Watch {
@@ -107,10 +178,140 @@ enum Command {
 }
 
 /// The Budd home the command line or the environment names.
-fn budd_home(home: Option<PathBuf>) -> Result<budd_claude::paths::BuddHome, String> {
+fn budd_home(home: Option<PathBuf>) -> Result<BuddHome, String> {
     match home {
-        Some(home) => Ok(budd_claude::paths::BuddHome::at(home)),
-        None => budd_claude::paths::BuddHome::resolve().map_err(|error| error.to_string()),
+        Some(home) => Ok(BuddHome::at(home)),
+        None => BuddHome::resolve().map_err(|error| error.to_string()),
+    }
+}
+
+/// Where to look for `claude` first: the command line's path, else the config file's `claude_path`.
+fn claude_hint(flag: Option<PathBuf>, home: &BuddHome) -> Option<PathBuf> {
+    flag.or_else(|| {
+        budd_claude::config::Config::load(&home.config_path())
+            .ok()
+            .and_then(|config| config.claude_path)
+    })
+}
+
+/// The `claude` Budd's own folder runs, when one is found: the hint, the usual places, then `PATH`.
+fn budds_claude(flag: Option<PathBuf>, home: &BuddHome) -> Option<Claude> {
+    let hint = claude_hint(flag, home);
+    claude_cli::locate(hint.as_deref()).map(|exe| {
+        let exe = std::path::absolute(&exe).unwrap_or(exe);
+        Claude::new(exe, home.claude_dir())
+    })
+}
+
+/// This binary, as the hooks and the MCP server must name it.
+fn this_exe() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|error| format!("finding this binary: {error}"))?;
+    Ok(std::path::absolute(&exe).unwrap_or(exe))
+}
+
+fn run_doctor(json: bool, home: Option<PathBuf>, claude: Option<PathBuf>) -> Result<bool, String> {
+    let home = budd_home(home)?;
+    let hint = claude_hint(claude, &home);
+    let context = doctor::Context::resolve(home, hint.as_deref());
+    let checks = doctor::run(&context);
+    if json {
+        let text = serde_json::to_string_pretty(&checks).map_err(|error| error.to_string())?;
+        println!("{text}");
+    } else {
+        for check in &checks {
+            println!("{}", check.line());
+        }
+    }
+    Ok(doctor::worst(&checks) != doctor::State::Fail)
+}
+
+fn run_setup(dry_run: bool, home: Option<PathBuf>, claude: Option<PathBuf>) -> Result<(), String> {
+    let home = budd_home(home)?;
+    let claude = budds_claude(claude, &home);
+    if claude.is_none() {
+        eprintln!(
+            "budd: claude was not found, so the MCP server is not registered; run setup again once it is installed"
+        );
+    }
+    let exe = this_exe()?;
+    let lines = setup::setup(&home, claude.as_ref(), &exe, dry_run).map_err(|error| error.to_string())?;
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_connect(
+    home: Option<PathBuf>,
+    claude: Option<PathBuf>,
+    terminal: &str,
+    wait: u64,
+    carry_trust_from: Option<PathBuf>,
+    import_memory_from: Option<PathBuf>,
+) -> Result<(), String> {
+    let home = budd_home(home)?;
+    let terminal =
+        Terminal::parse(terminal).ok_or_else(|| format!("{terminal:?} is not a terminal; use terminal or iterm"))?;
+    let claude = budds_claude(claude, &home).ok_or_else(|| setup::Error::NoClaude.to_string())?;
+    let options = ConnectOptions {
+        terminal,
+        wait: Duration::from_secs(wait),
+        carry_trust_from,
+        import_memory_from,
+    };
+    let mut out = std::io::stdout();
+    setup::connect(&home, &claude, &options, &mut out)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn run_reset(home: Option<PathBuf>, claude: Option<PathBuf>, sign_out: bool) -> Result<(), String> {
+    let home = budd_home(home)?;
+    let claude = budds_claude(claude, &home);
+    let endpoint = home.endpoint();
+    let mut via_daemon = || {
+        let pid = doctor::running_daemon(&home)?;
+        Some(ask_daemon(&endpoint, DaemonCommand::Reset, RESET_WAIT).map_err(|error| format!("pid {pid}: {error}")))
+    };
+    let report = setup::reset(&home, claude.as_ref(), sign_out, &mut via_daemon).map_err(|error| error.to_string())?;
+    if report.via_daemon {
+        println!("The daemon forgot what it learned and stopped the assistant; the keep-alive starts a fresh one.");
+    } else {
+        println!("No daemon running; the state was reset on disk.");
+    }
+    if report.state_deleted {
+        println!("Deleted {}", home.state_dir().join(setup::STATE_FILE).display());
+    }
+    if report.drops_removed > 0 {
+        println!(
+            "Removed {} dropped files from {}",
+            report.drops_removed,
+            home.drops_dir().display()
+        );
+    }
+    if report.signed_out {
+        println!("Signed out of Budd's Claude folder; run `budd connect` to log in again.");
+    }
+    Ok(())
+}
+
+/// Sends `command` to the daemon at `endpoint` and waits for its reply, for up to `wait`.
+fn ask_daemon(endpoint: &budd_claude::ipc::Endpoint, command: DaemonCommand, wait: Duration) -> Result<(), String> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| format!("starting the runtime: {error}"))?;
+    let request = Request { id: Some(1), command };
+    let reply = runtime
+        .block_on(budd_engine::client::request(endpoint, &request, wait))
+        .map_err(|error| {
+            if budd_claude::ipc::is_not_running(&error) {
+                format!("no budd daemon at {endpoint}")
+            } else {
+                error.to_string()
+            }
+        })?;
+    if reply.ok {
+        Ok(())
+    } else {
+        Err(reply.error.unwrap_or_else(|| "the daemon refused".to_owned()))
     }
 }
 
@@ -182,6 +383,28 @@ fn main() -> ExitCode {
             assistant_name,
             claude,
         })),
+        Command::Doctor { json, home, claude } => match run_doctor(json, home, claude) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => exit_code(Err(error)),
+        },
+        Command::Setup { dry_run, home, claude } => exit_code(run_setup(dry_run, home, claude)),
+        Command::Connect {
+            home,
+            claude,
+            terminal,
+            wait,
+            carry_trust_from,
+            import_memory_from,
+        } => exit_code(run_connect(
+            home,
+            claude,
+            &terminal,
+            wait,
+            carry_trust_from,
+            import_memory_from,
+        )),
+        Command::Reset { home, claude, sign_out } => exit_code(run_reset(home, claude, sign_out)),
         Command::Watch { json: _, home } => exit_code(run_watch(home)),
         Command::Send {
             config_dir,

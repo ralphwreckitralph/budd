@@ -12,6 +12,7 @@ use crate::engine::{Completion, Effect, Engine};
 use crate::host::{ClaudeHost, RealHost};
 use crate::server::{Clients, Inbound, Server, serve_connection};
 use budd_claude::claude_cli::{Claude, locate};
+use budd_claude::doctor;
 use budd_claude::ipc::Endpoint;
 use budd_claude::paths::{BuddHome, ensure_private_dir};
 use budd_claude::procs;
@@ -36,6 +37,8 @@ pub const KEEPALIVE: Duration = Duration::from_secs(5 * 60);
 pub const KEEPALIVE_FIRST: Duration = Duration::from_secs(20);
 /// How often the account is looked up again.
 pub const ACCOUNT: Duration = Duration::from_secs(10 * 60);
+/// How often `config.json` is looked at for a change.
+pub const CONFIG_POLL: Duration = Duration::from_secs(5);
 
 /// What `budd daemon` was started with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -174,7 +177,10 @@ enum Msg {
     Tick,
     Keepalive,
     Account(Result<budd_core::account::AccountStatus, String>),
+    Config(Result<budd_claude::config::Config, String>),
     Completion(Completion),
+    /// The process was told to stop (SIGTERM, SIGINT or Ctrl-C), so the lock and the advert go cleanly.
+    Signal(&'static str),
 }
 
 /// Runs the daemon until a client asks it to shut down. Blocks the calling task for its whole life.
@@ -193,10 +199,22 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
     let mut config = Config::new(home.root(), &config_dir).with_file(&home.config_path());
     config.claude = exe;
     if let Some(name) = &options.assistant_name {
-        config.assistant_name = name.clone();
+        config.fix_assistant_name(name.clone());
     }
     let claude = Claude::new(claude_exe, config_dir.clone());
-    let host: Arc<dyn ClaudeHost> = Arc::new(RealHost::new(claude.clone()));
+    let doctor = doctor::Context {
+        home: BuddHome::at(home.root()),
+        exe: std::env::current_exe()
+            .ok()
+            .and_then(|exe| std::path::absolute(&exe).ok())
+            .unwrap_or_else(|| PathBuf::from("budd")),
+        claude: config
+            .claude
+            .as_ref()
+            .map(|exe| Claude::new(exe.clone(), config_dir.clone())),
+        version: config.version.clone(),
+    };
+    let host: Arc<dyn ClaudeHost> = Arc::new(RealHost::new(claude.clone()).with_doctor(doctor));
     let endpoint = home.endpoint();
     let mut server = Server::bind(&endpoint).map_err(io_error("binding the endpoint"))?;
     let _advert =
@@ -302,6 +320,33 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
     });
 
+    // The settings file, read again whenever its time or size changes (an editor's save, or
+    // `settings.set` from another daemon's client).
+    let config_tx = tx.clone();
+    let config_path = home.config_path();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CONFIG_POLL);
+        let mut last = file_stamp(&config_path);
+        loop {
+            interval.tick().await;
+            let stamp = file_stamp(&config_path);
+            if stamp == last {
+                continue;
+            }
+            last = stamp;
+            let read = budd_claude::config::Config::load(&config_path).map_err(|error| error.to_string());
+            if config_tx.send(Msg::Config(read)).is_err() {
+                break;
+            }
+        }
+    });
+
+    // The stop signals, so launchd, the app or a Ctrl-C end the daemon with its lock and advert removed.
+    let signal_tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = signal_tx.send(Msg::Signal(stop_signal().await));
+    });
+
     // The engine's loop.
     let mut clients = Clients::new();
     while let Some(message) = rx.recv().await {
@@ -316,7 +361,12 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             Msg::Tick => engine.tick(),
             Msg::Keepalive => engine.keepalive_tick(),
             Msg::Account(status) => engine.on_account(status),
+            Msg::Config(file) => engine.on_config(file),
             Msg::Completion(completion) => engine.complete(completion),
+            Msg::Signal(name) => {
+                tracing::info!("shutting down on {name}");
+                break;
+            }
         }
         let _ = cadence_tx.send_replace(engine.cadence());
         for outgoing in engine.take_outgoing() {
@@ -337,6 +387,38 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
     }
     Ok(())
+}
+
+/// Waits for a signal that means stop, and says which: SIGTERM or SIGINT on Unix, Ctrl-C elsewhere.
+async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM cannot be watched; only Ctrl-C stops the daemon cleanly");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
+}
+
+/// When the file at `path` was last written and how long it is, or `None` when it is not there: what
+/// says it changed without reading it.
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// Runs one slow effect on a blocking thread and sends its completion back.
@@ -363,6 +445,10 @@ fn spawn_effect(host: Arc<dyn ClaudeHost>, effect: Effect, tx: mpsc::UnboundedSe
             Effect::StartBg { id, cwd, argv } => Completion::Started {
                 id,
                 result: host.start_bg(&cwd, &argv),
+            },
+            Effect::Doctor { id } => Completion::Doctor {
+                id,
+                checks: host.doctor(),
             },
             Effect::ListNow | Effect::ReadStateNow | Effect::Shutdown => return,
         };

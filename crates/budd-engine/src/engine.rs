@@ -10,6 +10,9 @@
 use crate::config::Config;
 use crate::host::{ClaudeHost, Outcome, SendTarget};
 use crate::state::Persisted;
+use budd_claude::config::Config as FileConfig;
+use budd_claude::crew as launcher;
+use budd_claude::doctor::Check;
 use budd_claude::watch::{Cadence, JobInfo};
 use budd_core::crew::{
     AgentRow, ArchivedCrew, CrewAttention, CrewBoard, LiveSession, OfficeChat, Status, assistant_flags, live_sessions,
@@ -18,16 +21,19 @@ use budd_core::delivery::{PathStyle, attachment_note, sendable, with_files};
 use budd_core::history::{ConversationHistory, TranscriptSource};
 use budd_core::keepalive::{self, Decision};
 use budd_core::presence::{Mood, Presence, PresenceResolver, SessionReport};
-use budd_core::reply::{Autopilot, Evidence, PilotMode, ReplyLink, ReplyOptions, UnreadReplies};
+use budd_core::reply::{
+    Autopilot, Evidence, PilotMode, ReplyLink, ReplyOptions, TicketKeys, TicketProjects, UnreadReplies,
+};
 use budd_core::tools::{BuddAsk, BuddBoard, BuddRequest, Call, ToolResult};
 use budd_core::transcript::{FIRST_TAIL, TranscriptFollower, TranscriptSummary, grown_tail, tail_start, whole_lines};
 use budd_proto::{
-    AccountEvent, ArchiveReply, AskEvent, Awaiting as AwaitingWire, Command, CrewAsk, CrewEvent, CrewMember, DeskState,
-    Event, EvidenceEvent, HelloReply, HistoryReply, LogEvent, PROTO, PresenceEvent, Reply, ReplyEvent, Request,
-    SayEvent, SendReply, SessionsEvent, Settings, Snapshot, Summary, Target, UnreadEvent,
+    AccountEvent, ArchiveReply, AskEvent, Awaiting as AwaitingWire, ChatReply, Command, CrewAsk, CrewEvent, CrewMember,
+    DeskState, DoctorReply, Event, EvidenceEvent, HelloReply, HistoryReply, LogEvent, PROTO, PresenceEvent, Reply,
+    ReplyEvent, Request, SayEvent, SendReply, SessionsEvent, Settings, Snapshot, StartReply, Summary, Target,
+    UnreadEvent,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// One connected client, as the engine tells them apart.
@@ -92,6 +98,11 @@ pub enum Effect {
     ListNow,
     /// Look at the state files now.
     ReadStateNow,
+    /// Run the doctor's checks.
+    Doctor {
+        /// Matches the [`Completion`].
+        id: u64,
+    },
     /// Stop the daemon.
     Shutdown,
 }
@@ -127,16 +138,25 @@ pub enum Completion {
         /// How.
         result: Result<Vec<String>, String>,
     },
+    /// A [`Effect::Doctor`] ended.
+    Doctor {
+        /// The effect's id.
+        id: u64,
+        /// The checks.
+        checks: Vec<Check>,
+    },
 }
 
 /// Why an effect was started, kept until it completes.
 #[derive(Debug, Clone)]
 enum Pending {
-    /// A message or an answer from a client; its reply waits on the outcome.
+    /// A message or an answer from a client; its reply waits on the outcome. `chat` names the chat
+    /// whose first message this is, whose reply says so.
     Message {
         client: ClientId,
         request: u64,
         awaiting: Awaiting,
+        chat: Option<String>,
     },
     /// Autopilot answering a crew session's ask.
     Autopilot {
@@ -162,6 +182,48 @@ enum Pending {
     KeepaliveStop { reason: String },
     /// The keep-alive starting a fresh assistant.
     KeepaliveStart { reason: String },
+    /// A crew session starting for a client, alone or as one of a batch of tickets.
+    CrewStart {
+        client: ClientId,
+        request: u64,
+        name: String,
+        batch: Option<u64>,
+    },
+    /// A chat starting for a client; its first message goes once the session is listed.
+    Chat {
+        client: ClientId,
+        request: u64,
+        name: String,
+        message: String,
+        pictures: Vec<String>,
+        files: Vec<String>,
+    },
+    /// A reset stopping the assistant.
+    ResetStop,
+    /// The doctor's checks running for a client.
+    Doctor { client: ClientId, request: u64 },
+}
+
+/// A batch of crew starts from one request, answered when the last one ends.
+#[derive(Debug, Clone)]
+struct Batch {
+    client: ClientId,
+    request: u64,
+    remaining: usize,
+    started: Vec<String>,
+    failed: Vec<String>,
+}
+
+/// A chat whose session was started and is awaited in the listing, to get its first message.
+#[derive(Debug, Clone)]
+struct StartingChat {
+    client: ClientId,
+    request: u64,
+    name: String,
+    message: String,
+    pictures: Vec<String>,
+    files: Vec<String>,
+    since: f64,
 }
 
 /// A message sent through Budd whose answer is awaited.
@@ -263,6 +325,9 @@ pub struct Engine {
     account: Option<AccountEvent>,
     told: Told,
     keepalive_busy: bool,
+    batches: HashMap<u64, Batch>,
+    next_batch: u64,
+    starting_chats: Vec<StartingChat>,
 }
 
 /// The line a crew session is given when it asks through Budd.
@@ -285,6 +350,8 @@ const IDLE_MEANS_DONE: f64 = 6.0;
 const CREW_QUIET: f64 = 2.0;
 /// How long the assistant's pinned ask stands.
 const ASK_LINGERS: f64 = 10.0 * 60.0;
+/// How long a started chat may take to show in the listing before its message is given up.
+const CHAT_SHOWS_UP: f64 = 60.0;
 
 impl Engine {
     /// An engine over `host` with `config`, remembering what the last run saved.
@@ -333,6 +400,26 @@ impl Engine {
                 ..Told::default()
             },
             keepalive_busy: false,
+            batches: HashMap::new(),
+            next_batch: 1,
+            starting_chats: Vec::new(),
+        }
+    }
+
+    /// The settings file was read again: its settings apply from now on, or the file is broken and
+    /// the settings in force stay until it is fixed.
+    pub fn on_config(&mut self, file: Result<FileConfig, String>) {
+        match file {
+            Ok(file) if self.config.file == file => {}
+            Ok(file) => {
+                self.config.apply(file);
+                self.log("info", "config.json reloaded");
+                self.settle();
+            }
+            Err(error) => self.log(
+                "warn",
+                &format!("config.json was not read; keeping the settings in force: {error}"),
+            ),
         }
     }
 
@@ -437,6 +524,7 @@ impl Engine {
         self.histories.retain(|id, _| ids.contains(id));
         self.sessions = sessions;
         self.read_crew();
+        self.place_chats();
         let retries = std::mem::take(&mut self.retry_calls);
         for (client, request, call) in retries {
             self.tool_call(client, request, call, true);
@@ -477,6 +565,7 @@ impl Engine {
     /// settled. Called about once a second.
     pub fn tick(&mut self) {
         self.read_crew();
+        self.place_chats();
         self.settle();
     }
 
@@ -512,8 +601,8 @@ impl Engine {
         let input = keepalive::Input {
             newest,
             rotate_at: self.config.rotate_at,
-            idle_min: keepalive::Input::IDLE_MIN,
-            quiet_min: keepalive::Input::QUIET_MIN,
+            idle_min: self.config.file.assistant.idle_minutes as f64,
+            quiet_min: self.config.file.assistant.quiet_minutes as f64,
             transcript_grew: false,
             send_in_flight,
             standing_ask,
@@ -544,34 +633,29 @@ impl Engine {
                     client,
                     request,
                     awaiting,
+                    chat,
                 }) => {
                     self.sending = false;
-                    match outcome {
+                    let (delivered, reason) = match outcome {
                         Outcome::Delivered => {
                             self.awaiting = Some(awaiting);
                             self.transcript_checked_at = None;
-                            self.reply(
-                                client,
-                                Reply::ok(
-                                    request,
-                                    &SendReply {
-                                        delivered: true,
-                                        reason: None,
-                                    },
-                                ),
-                            );
+                            (true, None)
                         }
-                        Outcome::Unconfirmed(reason) => self.reply(
-                            client,
-                            Reply::ok(
-                                request,
-                                &SendReply {
-                                    delivered: false,
-                                    reason: Some(reason),
-                                },
-                            ),
+                        Outcome::Unconfirmed(reason) => (false, Some(reason)),
+                    };
+                    let reply = match chat {
+                        Some(name) => Reply::ok(
+                            request,
+                            &ChatReply {
+                                name,
+                                delivered,
+                                reason,
+                            },
                         ),
-                    }
+                        None => Reply::ok(request, &SendReply { delivered, reason }),
+                    };
+                    self.reply(client, reply);
                 }
                 Some(Pending::Autopilot {
                     session,
@@ -662,18 +746,73 @@ impl Engine {
                         self.log("warn", &format!("keep-alive could not stop the assistant: {failure}"));
                     }
                 },
+                Some(Pending::ResetStop) => {
+                    match result {
+                        Ok(()) => self.log(
+                            "info",
+                            "reset: the assistant was stopped; the keep-alive starts a fresh one",
+                        ),
+                        Err(failure) => self.log("warn", &format!("reset could not stop the assistant: {failure}")),
+                    }
+                    self.effects.push(Effect::ListNow);
+                }
                 _ => {}
             },
             Completion::Started { id, result } => {
-                if let Some(Pending::KeepaliveStart { reason }) = self.pending.remove(&id) {
-                    self.keepalive_busy = false;
-                    match result {
-                        Ok(_) => self.log("info", &format!("keep-alive started a fresh assistant ({reason})")),
-                        Err(failure) => {
-                            self.log("warn", &format!("keep-alive could not start the assistant: {failure}"))
+                match self.pending.remove(&id) {
+                    Some(Pending::KeepaliveStart { reason }) => {
+                        self.keepalive_busy = false;
+                        match result {
+                            Ok(_) => self.log("info", &format!("keep-alive started a fresh assistant ({reason})")),
+                            Err(failure) => {
+                                self.log("warn", &format!("keep-alive could not start the assistant: {failure}"))
+                            }
                         }
                     }
-                    self.effects.push(Effect::ListNow);
+                    Some(Pending::CrewStart {
+                        client,
+                        request,
+                        name,
+                        batch,
+                    }) => self.crew_started(client, request, name, batch, result),
+                    Some(Pending::Chat {
+                        client,
+                        request,
+                        name,
+                        message,
+                        pictures,
+                        files,
+                    }) => match result {
+                        Ok(_) => {
+                            self.log("info", &format!("started the chat {name}"));
+                            self.starting_chats.push(StartingChat {
+                                client,
+                                request,
+                                name,
+                                message,
+                                pictures,
+                                files,
+                                since: now,
+                            });
+                        }
+                        Err(failure) => {
+                            self.reply(
+                                client,
+                                Reply::error(request, format!("Couldn't start a chat: {failure}")),
+                            );
+                        }
+                    },
+                    _ => {}
+                }
+                self.effects.push(Effect::ListNow);
+            }
+            Completion::Doctor { id, checks } => {
+                if let Some(Pending::Doctor { client, request }) = self.pending.remove(&id) {
+                    let checks = checks
+                        .iter()
+                        .filter_map(|check| serde_json::to_value(check).ok())
+                        .collect();
+                    self.reply(client, Reply::ok(request, &DoctorReply { checks }));
                 }
             }
         }
@@ -710,10 +849,33 @@ impl Engine {
             } => self.deliver(client, id, target, message, pictures, files),
             Command::Answer { target, answer } => self.deliver(client, id, target, answer, Vec::new(), Vec::new()),
             Command::Archive { session, force } => self.archive(client, id, &session, force),
-            Command::StartTickets { .. } | Command::CrewStart { .. } | Command::Chat { .. } => {
-                // TODO: start crew and chats through `claude --bg` once the messenger lands beside this crate.
-                self.reply(client, Reply::error(id, "not yet"));
+            Command::StartTickets { text } => self.start_tickets(client, id, &text),
+            Command::CrewStart {
+                name,
+                brief,
+                cwd,
+                model,
+                add_dir,
+                chrome,
+            } => {
+                let mut file = self.config.file.clone();
+                if model.is_some() {
+                    file.crew.model = model;
+                }
+                if let Some(dir) = add_dir {
+                    file.crew.add_dir = Some(PathBuf::from(dir));
+                }
+                file.crew.chrome = file.crew.chrome || chrome;
+                match self.crew_start(client, id, &file, Path::new(&cwd), &name, &brief, None) {
+                    Ok(()) => {}
+                    Err(error) => self.reply(client, Reply::error(id, error)),
+                }
             }
+            Command::Chat {
+                message,
+                pictures,
+                files,
+            } => self.chat(client, id, message, pictures, files),
             Command::Clear { target } => self.clear(client, id, target),
             Command::Mode { pilot, office_open } => {
                 if let Some(pilot) = pilot {
@@ -746,6 +908,21 @@ impl Engine {
             Command::SettingsGet => {
                 let settings = self.settings();
                 self.reply(client, Reply::ok(id, &settings));
+            }
+            Command::SettingsSet { patch } => match self.set_settings(&patch) {
+                Ok(()) => {
+                    let settings = self.settings();
+                    self.reply(client, Reply::ok(id, &settings));
+                }
+                Err(error) => self.reply(client, Reply::error(id, error)),
+            },
+            Command::DoctorRun => {
+                // The checks take seconds (claude runs), so they go off the thread like a send.
+                self.start_effect(Pending::Doctor { client, request: id }, |id| Effect::Doctor { id });
+            }
+            Command::Reset => {
+                self.reset();
+                self.reply(client, Reply::done(id));
             }
             Command::Shutdown => {
                 self.reply(client, Reply::done(id));
@@ -788,6 +965,10 @@ impl Engine {
                         let result = host.start_bg(&cwd, &argv);
                         self.complete(Completion::Started { id, result });
                     }
+                    Effect::Doctor { id } => {
+                        let checks = host.doctor();
+                        self.complete(Completion::Doctor { id, checks });
+                    }
                     other => left.push(other),
                 }
             }
@@ -805,6 +986,21 @@ impl Engine {
         text: String,
         pictures: Vec<String>,
         files: Vec<String>,
+    ) {
+        self.deliver_for(client, request, target, text, pictures, files, None);
+    }
+
+    /// [`Engine::deliver`], with `chat` naming the chat whose first message this is.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_for(
+        &mut self,
+        client: ClientId,
+        request: u64,
+        target: Target,
+        text: String,
+        pictures: Vec<String>,
+        files: Vec<String>,
+        chat: Option<String>,
     ) {
         if self.sending {
             self.reply(client, Reply::error(request, "Still sending the last message."));
@@ -857,6 +1053,7 @@ impl Engine {
                 client,
                 request,
                 awaiting,
+                chat,
             },
             |id| Effect::Send {
                 id,
@@ -865,6 +1062,326 @@ impl Engine {
                 pictures,
             },
         );
+    }
+
+    // Crew and chats.
+
+    /// Starts one crew session per ticket key in `text`, each in the project its prefix belongs to,
+    /// named after the key, with the project's command. Nothing starts while a key is unclaimed or a
+    /// start is refused: a batch goes whole or not at all, as the Swift app's Start Tickets did.
+    fn start_tickets(&mut self, client: ClientId, request: u64, text: &str) {
+        let keys = TicketKeys::parse(text);
+        let table = self.config.file.ticket_table();
+        if keys.is_empty() {
+            let example = table.keys().next().cloned().unwrap_or_else(|| "ABC".to_owned());
+            self.reply(
+                client,
+                Reply::error(
+                    request,
+                    format!("No ticket keys in that. Type them like {example}-1104."),
+                ),
+            );
+            return;
+        }
+        let (routed, unclaimed) = TicketProjects::route(&keys, &table);
+        if !unclaimed.is_empty() {
+            let mut prefixes: Vec<String> = unclaimed.iter().map(|key| TicketKeys::prefix(key)).collect();
+            prefixes.sort();
+            prefixes.dedup();
+            let names = prefixes.join(" or ");
+            self.reply(
+                client,
+                Reply::error(
+                    request,
+                    format!(
+                        "Nothing started: no project takes {names} tickets. Take them out, or add {names} to a project in config.json."
+                    ),
+                ),
+            );
+            return;
+        }
+        // Every start is checked before any is made, so a refusal costs nothing.
+        let home = std::env::home_dir();
+        let file = self.config.file.clone();
+        let mut plans: Vec<(PathBuf, String, String)> = Vec::new();
+        let mut taken: Vec<String> = self.taken_names();
+        let mode = self.host.permission_mode();
+        for routed in &routed {
+            let name = routed.key.to_lowercase();
+            let folder = budd_claude::config::expand_tilde(Path::new(&routed.project.folder), home.as_deref());
+            let command = budd_claude::config::ticket_command(&routed.project.command, &routed.key);
+            let checked = self
+                .host
+                .check_crew_folder(&folder, &self.config.assistant_dir())
+                .and_then(|cwd| {
+                    launcher::start_argv(&file, &name, &command, &taken, &mode)
+                        .map(|_| cwd)
+                        .map_err(|refusal| refusal.to_string())
+                });
+            match checked {
+                Ok(cwd) => {
+                    taken.push(name.clone());
+                    plans.push((cwd, name, command));
+                }
+                Err(error) => {
+                    self.reply(
+                        client,
+                        Reply::error(request, format!("Nothing started: {}: {error}", routed.key)),
+                    );
+                    return;
+                }
+            }
+        }
+        let batch = self.next_batch;
+        self.next_batch += 1;
+        self.batches.insert(
+            batch,
+            Batch {
+                client,
+                request,
+                remaining: plans.len(),
+                started: Vec::new(),
+                failed: Vec::new(),
+            },
+        );
+        for (cwd, name, command) in plans {
+            if let Err(error) = self.crew_start(client, request, &file, &cwd, &name, &command, Some(batch)) {
+                self.crew_started(client, request, name, Some(batch), Err(error));
+            }
+        }
+    }
+
+    /// Starts the crew session `name` in `folder` with `brief`, under `file`'s crew settings: the
+    /// folder is checked, the name and mode go through the rules, the folder is trusted, and
+    /// `claude --bg` runs as an effect whose completion answers the client (or the batch).
+    #[allow(clippy::too_many_arguments)]
+    fn crew_start(
+        &mut self,
+        client: ClientId,
+        request: u64,
+        file: &FileConfig,
+        folder: &Path,
+        name: &str,
+        brief: &str,
+        batch: Option<u64>,
+    ) -> Result<(), String> {
+        let cwd = self.host.check_crew_folder(folder, &self.config.assistant_dir())?;
+        let taken = self.taken_names();
+        let mode = self.host.permission_mode();
+        let argv = launcher::start_argv(file, name, brief, &taken, &mode).map_err(|refusal| refusal.to_string())?;
+        self.host.trust_folder(&cwd)?;
+        self.log("info", &format!("starting {name} in {} ({mode} mode)", cwd.display()));
+        self.start_effect(
+            Pending::CrewStart {
+                client,
+                request,
+                name: name.to_owned(),
+                batch,
+            },
+            |id| Effect::StartBg { id, cwd, argv },
+        );
+        Ok(())
+    }
+
+    /// A crew start ended: alone, the client gets its reply; in a batch, the batch answers when its
+    /// last start ends.
+    fn crew_started(
+        &mut self,
+        client: ClientId,
+        request: u64,
+        name: String,
+        batch: Option<u64>,
+        result: Result<Vec<String>, String>,
+    ) {
+        let outcome = match result {
+            Ok(_) => {
+                self.log("info", &format!("started {name}"));
+                Ok(name)
+            }
+            Err(failure) => {
+                self.log("warn", &format!("could not start {name}: {failure}"));
+                Err(format!("{name}: {failure}"))
+            }
+        };
+        let Some(batch) = batch else {
+            let reply = match outcome {
+                Ok(name) => Reply::ok(
+                    request,
+                    &StartReply {
+                        started: vec![name],
+                        failed: Vec::new(),
+                    },
+                ),
+                Err(failure) => Reply::error(request, format!("Couldn't start {failure}")),
+            };
+            self.reply(client, reply);
+            return;
+        };
+        let Some(entry) = self.batches.get_mut(&batch) else {
+            return;
+        };
+        match outcome {
+            Ok(name) => entry.started.push(name),
+            Err(failure) => entry.failed.push(failure),
+        }
+        entry.remaining = entry.remaining.saturating_sub(1);
+        if entry.remaining > 0 {
+            return;
+        }
+        let Some(done) = self.batches.remove(&batch) else {
+            return;
+        };
+        let reply = if done.failed.is_empty() {
+            Reply::ok(
+                done.request,
+                &StartReply {
+                    started: done.started,
+                    failed: Vec::new(),
+                },
+            )
+        } else {
+            let started = if done.started.is_empty() {
+                String::new()
+            } else {
+                format!("Started {}. ", done.started.join(", "))
+            };
+            Reply::error(
+                done.request,
+                format!("{started}Couldn't start {}", done.failed.join("; ")),
+            )
+        };
+        self.reply(done.client, reply);
+    }
+
+    /// The names a new session may not take: the live sessions' and the ones still starting.
+    fn taken_names(&self) -> Vec<String> {
+        let mut taken: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|session| !session.asleep())
+            .map(|session| session.name.clone())
+            .collect();
+        taken.extend(self.pending.values().filter_map(|pending| match pending {
+            Pending::CrewStart { name, .. } | Pending::Chat { name, .. } => Some(name.clone()),
+            _ => None,
+        }));
+        taken.extend(self.starting_chats.iter().map(|chat| chat.name.clone()));
+        taken
+    }
+
+    /// Starts a chat about `message`: a session in the assistant's folder named after its first words,
+    /// which gets the message, pictures and files once it is listed.
+    fn chat(&mut self, client: ClientId, request: u64, message: String, pictures: Vec<String>, files: Vec<String>) {
+        let taken = self.taken_names();
+        let name = OfficeChat::name(&message, &taken, &launcher::hhmm(self.host.now() as u64));
+        let home = budd_claude::paths::BuddHome::at(&self.config.home);
+        let argv = match launcher::chat_argv(&self.config.file, &home, &name, &taken) {
+            Ok(argv) => argv,
+            Err(refusal) => {
+                self.reply(
+                    client,
+                    Reply::error(request, format!("Couldn't start a chat: {refusal}")),
+                );
+                return;
+            }
+        };
+        let cwd = self.config.assistant_dir();
+        if let Err(error) = self.host.trust_folder(&cwd) {
+            self.reply(client, Reply::error(request, format!("Couldn't start a chat: {error}")));
+            return;
+        }
+        self.log("info", &format!("starting the chat {name}"));
+        self.start_effect(
+            Pending::Chat {
+                client,
+                request,
+                name,
+                message,
+                pictures,
+                files,
+            },
+            |id| Effect::StartBg { id, cwd, argv },
+        );
+    }
+
+    /// Sends each starting chat its first message once the listing has it, one at a time, and gives
+    /// up on one that never shows.
+    fn place_chats(&mut self) {
+        if self.starting_chats.is_empty() {
+            return;
+        }
+        let now = self.host.now();
+        let mut waiting = std::mem::take(&mut self.starting_chats);
+        let mut index = 0;
+        while index < waiting.len() {
+            let member = self
+                .crew
+                .iter()
+                .find(|m| m.session.name == waiting[index].name)
+                .map(|m| m.session.session_id.clone());
+            match member {
+                Some(session) if !self.sending => {
+                    let chat = waiting.remove(index);
+                    self.deliver_for(
+                        chat.client,
+                        chat.request,
+                        Target::Crew(session),
+                        chat.message,
+                        chat.pictures,
+                        chat.files,
+                        Some(chat.name),
+                    );
+                }
+                Some(_) => index += 1,
+                None if now - waiting[index].since > CHAT_SHOWS_UP => {
+                    let chat = waiting.remove(index);
+                    self.reply(
+                        chat.client,
+                        Reply::error(
+                            chat.request,
+                            format!(
+                                "{} started, but never showed up in the office, so the message was not sent.",
+                                chat.name
+                            ),
+                        ),
+                    );
+                }
+                None => index += 1,
+            }
+        }
+        self.starting_chats = waiting;
+    }
+
+    /// Lays `patch` over the settings file, writes it and applies it. A file that cannot be read as
+    /// a config is never written over.
+    fn set_settings(&mut self, patch: &serde_json::Value) -> Result<(), String> {
+        let path = self.config.file_path();
+        let current = self.host.load_config(&path)?;
+        let next = current
+            .patched(patch)
+            .map_err(|error| format!("that is not a valid config change: {error}"))?;
+        self.host.save_config(&path, &next)?;
+        self.on_config(Ok(next));
+        Ok(())
+    }
+
+    /// Forgets what was learned while running and stops the assistant, so he starts over; the config,
+    /// the folder and the login stay.
+    fn reset(&mut self) {
+        self.pilot = Autopilot::from_plist(&serde_json::Value::Object(Default::default()));
+        self.attention = CrewAttention::new(HashMap::new());
+        self.unread = UnreadReplies::restored(0, None);
+        self.pilot_mode = self.config.file.pilot.mode;
+        self.office_open = true;
+        self.awaiting = None;
+        self.assistant_ask = None;
+        self.log(
+            "info",
+            "reset: forgot the unread replies, the asks seen, autopilot's answers and the mode",
+        );
+        if let Some(short_id) = self.bound.as_ref().map(|bound| bound.id.clone()) {
+            self.start_effect(Pending::ResetStop, |id| Effect::Stop { id, short_id });
+        }
     }
 
     fn clear(&mut self, client: ClientId, request: u64, target: Target) {
@@ -1410,6 +1927,7 @@ impl Engine {
             rotate_at: self.config.rotate_at,
             claude: self.config.claude.as_ref().map(|p| p.to_string_lossy().into_owned()),
             version: self.config.version.clone(),
+            config: self.config.file.to_value(),
         }
     }
 
@@ -2676,7 +3194,15 @@ mod tests {
         let settings: Settings = replies[1].decode().expect("settings");
         assert_eq!(settings.pilot_mode, PilotMode::Autopilot);
         assert!(!settings.office_open);
-        assert_eq!(replies[3].error.as_deref(), Some("not yet"));
+        assert_eq!(settings.config["assistant"]["model"], "opus");
+        assert!(
+            replies[3]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("no project takes CASBO tickets")),
+            "{:?}",
+            replies[3]
+        );
         assert!(rig.engine.take_effects().contains(&Effect::Shutdown));
         let saved = Persisted::load(&rig.engine.config.state_path());
         assert_eq!(saved.pilot_mode, PilotMode::Autopilot);
@@ -2699,5 +3225,342 @@ mod tests {
         let source = budd_core::history::MemorySource::new(1, format!("{}\n", lines.join("\n")).into_bytes());
         assert_eq!(answer_in(&source, "work on this").as_deref(), Some("Started it."));
         assert_eq!(answer_in(&source, "never sent"), None);
+    }
+
+    fn start_reply(reply: &Reply) -> StartReply {
+        reply.decode().expect("a start reply")
+    }
+
+    #[test]
+    fn crew_start_checks_the_folder_name_and_mode_then_trusts_and_starts() {
+        let mut rig = Rig::new();
+        let repo = PathBuf::from("/w/repo");
+        rig.host.add_repository(&repo);
+        rig.list(vec![assistant_row(), crew_row("busy", "working")]);
+        let start = |name: &str, cwd: &str| Command::CrewStart {
+            name: name.to_owned(),
+            brief: "do it".to_owned(),
+            cwd: cwd.to_owned(),
+            model: Some("sonnet".to_owned()),
+            add_dir: None,
+            chrome: false,
+        };
+        rig.command(1, start("fix-1", "/w/repo"));
+        assert!(rig.replies().is_empty(), "the reply waits on the start");
+        assert!(rig.engine.drive().contains(&Effect::ListNow));
+        let did = rig.host.take_did();
+        assert_eq!(did[0], Did::Trust(repo.clone()));
+        match &did[1] {
+            Did::Start(cwd, argv) => {
+                assert_eq!(cwd, &repo);
+                assert!(argv.windows(2).any(|w| w == ["--name", "fix-1"]), "{argv:?}");
+                assert!(argv.windows(2).any(|w| w == ["--model", "sonnet"]), "{argv:?}");
+                assert_eq!(argv.last().map(String::as_str), Some("do it"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let replies = rig.replies();
+        assert_eq!(start_reply(&replies[0]).started, vec!["fix-1".to_owned()]);
+        // Refused before anything runs: no repository, the assistant's folder, a name in use, bypass mode.
+        rig.command(2, start("fix-2", "/w/nope"));
+        rig.command(3, start("fix-3", &rig.engine.config.assistant_dir().to_string_lossy()));
+        rig.command(4, start("casbo-1", "/w/repo"));
+        rig.host.set_permission_mode("bypassPermissions");
+        rig.command(5, start("fix-5", "/w/repo"));
+        rig.host.set_permission_mode("default");
+        assert!(rig.engine.drive().is_empty());
+        assert!(rig.host.take_did().is_empty(), "nothing was trusted or started");
+        let errors: Vec<String> = rig.replies().into_iter().map(|r| r.error.expect("an error")).collect();
+        assert!(errors[0].contains("not a git repository"), "{errors:?}");
+        assert!(errors[1].contains("assistant's own folder"), "{errors:?}");
+        assert!(errors[2].contains("already called \"casbo-1\""), "{errors:?}");
+        assert!(errors[3].contains("bypassPermissions"), "{errors:?}");
+        // A start that fails names the session and why.
+        rig.host.set_start_fails(Some("claude: boom"));
+        rig.command(6, start("fix-6", "/w/repo"));
+        rig.engine.drive();
+        let replies = rig.replies();
+        assert_eq!(replies[0].error.as_deref(), Some("Couldn't start fix-6: claude: boom"));
+    }
+
+    fn with_projects(rig: &mut Rig) {
+        let mut file = FileConfig::default();
+        file.projects.push(budd_claude::config::Project {
+            prefixes: vec!["CASBO".to_owned()],
+            name: "casbo".to_owned(),
+            folder: PathBuf::from("/w/repo"),
+            command: "/budd:do-it {key}".to_owned(),
+        });
+        rig.engine.on_config(Ok(file));
+        rig.host.add_repository(Path::new("/w/repo"));
+    }
+
+    #[test]
+    fn start_tickets_routes_every_key_to_its_project_and_answers_the_batch_whole() {
+        let mut rig = Rig::new();
+        with_projects(&mut rig);
+        rig.list(vec![assistant_row(), crew_row("busy", "working")]);
+        rig.command(
+            1,
+            Command::StartTickets {
+                text: "CASBO-7 and casbo-8 please".to_owned(),
+            },
+        );
+        assert!(
+            rig.replies().is_empty(),
+            "one reply for the whole batch, when it is done"
+        );
+        rig.engine.drive();
+        let starts: Vec<(PathBuf, String)> = rig
+            .host
+            .take_did()
+            .into_iter()
+            .filter_map(|did| match did {
+                Did::Start(cwd, argv) => Some((cwd, argv.last().cloned().unwrap_or_default())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![
+                (PathBuf::from("/w/repo"), "/budd:do-it CASBO-7".to_owned()),
+                (PathBuf::from("/w/repo"), "/budd:do-it CASBO-8".to_owned()),
+            ]
+        );
+        let replies = rig.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            start_reply(&replies[0]).started,
+            vec!["casbo-7".to_owned(), "casbo-8".to_owned()]
+        );
+        // A key nobody takes stops the whole batch, naming the prefix.
+        rig.command(
+            2,
+            Command::StartTickets {
+                text: "CASBO-9 GNX-1".to_owned(),
+            },
+        );
+        // So does a name already live, before anything starts.
+        rig.command(
+            3,
+            Command::StartTickets {
+                text: "CASBO-1 CASBO-9".to_owned(),
+            },
+        );
+        assert!(rig.engine.drive().is_empty());
+        assert!(rig.host.take_did().is_empty());
+        let errors: Vec<String> = rig.replies().into_iter().map(|r| r.error.expect("an error")).collect();
+        assert!(errors[0].contains("no project takes GNX tickets"), "{errors:?}");
+        assert!(
+            errors[1].starts_with("Nothing started: CASBO-1:") && errors[1].contains("already called"),
+            "{errors:?}"
+        );
+        // Two keys of one batch may not take the same name twice either.
+        rig.command(
+            4,
+            Command::StartTickets {
+                text: "CASBO-9 CASBO-9".to_owned(),
+            },
+        );
+        rig.engine.drive();
+        assert_eq!(
+            rig.host
+                .take_did()
+                .iter()
+                .filter(|d| matches!(d, Did::Start(..)))
+                .count(),
+            1
+        );
+        assert_eq!(start_reply(&rig.replies()[0]).started, vec!["casbo-9".to_owned()]);
+        // When a start fails, the reply says what did start and what did not.
+        rig.host.set_start_fails(Some("boom"));
+        rig.command(
+            5,
+            Command::StartTickets {
+                text: "CASBO-10 CASBO-11".to_owned(),
+            },
+        );
+        rig.engine.drive();
+        assert_eq!(
+            rig.replies()[0].error.as_deref(),
+            Some("Couldn't start casbo-10: boom; casbo-11: boom")
+        );
+    }
+
+    #[test]
+    fn a_chat_starts_in_the_assistants_folder_and_gets_its_message_once_listed() {
+        let mut rig = Rig::new();
+        rig.list(vec![assistant_row()]);
+        rig.command(
+            1,
+            Command::Chat {
+                message: "Where is the dev server set up?".to_owned(),
+                pictures: vec!["/p/shot.png".to_owned()],
+                files: vec![],
+            },
+        );
+        rig.engine.drive();
+        let assistant_dir = rig.engine.config.assistant_dir();
+        let did = rig.host.take_did();
+        assert_eq!(did[0], Did::Trust(assistant_dir.clone()));
+        match &did[1] {
+            Did::Start(cwd, argv) => {
+                assert_eq!(cwd, &assistant_dir);
+                assert!(
+                    argv.windows(2).any(|w| w == ["--name", "chat-where-is-the-dev"]),
+                    "{argv:?}"
+                );
+                assert!(argv.windows(2).any(|w| w == ["--permission-mode", "auto"]), "{argv:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(rig.replies().is_empty(), "the reply waits on the message");
+        // A second chat with the same words takes the next name while the first still starts.
+        rig.command(
+            2,
+            Command::Chat {
+                message: "where is the dev server?".to_owned(),
+                pictures: vec![],
+                files: vec![],
+            },
+        );
+        rig.engine.drive();
+        assert!(
+            matches!(&rig.host.take_did()[1], Did::Start(_, argv) if argv.contains(&"chat-where-is-the-dev-2".to_owned()))
+        );
+        // Nothing is sent until the listing has the session.
+        rig.engine.tick();
+        assert!(rig.engine.drive().is_empty());
+        assert!(rig.host.take_did().is_empty());
+        let chat = row(
+            "x1",
+            OTHER_SID,
+            "chat-where-is-the-dev",
+            Some(303),
+            "idle",
+            "working",
+            3.0,
+        );
+        rig.list(vec![assistant_row(), chat]);
+        rig.engine.drive();
+        assert_eq!(
+            rig.host.take_did(),
+            vec![Did::Send(
+                "x1".to_owned(),
+                "Where is the dev server set up?".to_owned(),
+                vec!["/p/shot.png".to_owned()]
+            )]
+        );
+        let replies = rig.replies();
+        assert_eq!(replies.len(), 1);
+        let reply: ChatReply = replies[0].decode().expect("a chat reply");
+        assert_eq!(replies[0].id, 1);
+        assert_eq!(reply.name, "chat-where-is-the-dev");
+        assert!(reply.delivered);
+        // The second never shows up, and its client hears so.
+        rig.host.advance(CHAT_SHOWS_UP + 1.0);
+        rig.engine.tick();
+        let replies = rig.replies();
+        assert_eq!(replies[0].id, 2);
+        assert!(
+            replies[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("chat-where-is-the-dev-2 started, but never showed up")),
+            "{replies:?}"
+        );
+    }
+
+    #[test]
+    fn settings_set_writes_the_file_and_the_daemon_runs_on_it() {
+        let mut rig = Rig::new();
+        let path = rig.engine.config.file_path();
+        assert!(!path.exists());
+        rig.command(
+            1,
+            Command::SettingsSet {
+                patch: json!({"assistant": {"model": "sonnet"}, "crew": {"context_limit": 500}, "projects": [{"prefixes": ["GNX"], "folder": "/w/gnx"}]}),
+            },
+        );
+        let replies = rig.replies();
+        let settings: Settings = replies[0].decode().expect("the settings");
+        assert_eq!(settings.config["assistant"]["model"], "sonnet");
+        assert_eq!(settings.crew_context_limit, 500);
+        assert_eq!(rig.engine.config.assistant_model, "sonnet");
+        let saved = FileConfig::load(&path).expect("the file");
+        assert_eq!(saved.crew.context_limit, 500);
+        assert_eq!(saved.projects[0].command, "/budd:do-it {key}", "defaults fill in");
+        assert!(
+            rig.events()
+                .iter()
+                .any(|e| matches!(e, Event::Log(l) if l.message == "config.json reloaded"))
+        );
+        // A patch that is not a config is refused and the file is left alone.
+        rig.command(
+            2,
+            Command::SettingsSet {
+                patch: json!({"crew": {"context_limit": "lots"}}),
+            },
+        );
+        let replies = rig.replies();
+        assert!(
+            replies[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("not a valid config change"))
+        );
+        assert_eq!(FileConfig::load(&path).expect("the file").crew.context_limit, 500);
+        // The file read again as broken keeps the settings in force; read again unchanged says nothing.
+        rig.engine.on_config(Err("garbage".to_owned()));
+        assert_eq!(rig.engine.config.crew_context_limit, 500);
+        assert!(
+            rig.events()
+                .iter()
+                .any(|e| matches!(e, Event::Log(l) if l.level == "warn"))
+        );
+        rig.engine.on_config(Ok(saved));
+        assert!(rig.events().is_empty());
+    }
+
+    #[test]
+    fn doctor_run_answers_with_the_hosts_checks_and_reset_forgets_and_stops_the_assistant() {
+        let mut rig = Rig::new();
+        rig.command(1, Command::DoctorRun);
+        assert!(rig.replies().is_empty());
+        rig.engine.drive();
+        let replies = rig.replies();
+        let doctor: DoctorReply = replies[0].decode().expect("the checks");
+        assert_eq!(doctor.checks[0]["name"], "mock");
+        assert_eq!(doctor.checks[0]["state"], "ok");
+        // Something to forget: an unread reply and autopilot mode.
+        rig.list(vec![assistant_row()]);
+        rig.engine.on_state_file(
+            ASSISTANT_SID,
+            Some(SessionReport::new("idle", 1.0)),
+            Some(("first".to_owned(), 100.0)),
+        );
+        rig.engine.on_state_file(
+            ASSISTANT_SID,
+            Some(SessionReport::new("idle", 1.0)),
+            Some(("second".to_owned(), 200.0)),
+        );
+        rig.command(
+            2,
+            Command::Mode {
+                pilot: Some(PilotMode::Autopilot),
+                office_open: Some(false),
+            },
+        );
+        assert_eq!(rig.engine.unread_event().count, 1);
+        rig.command(3, Command::Reset);
+        assert!(rig.replies().iter().any(|r| r.id == 3 && r.ok));
+        assert_eq!(rig.engine.unread_event().count, 0);
+        assert_eq!(rig.engine.pilot_mode, PilotMode::Human);
+        assert!(rig.engine.office_open);
+        rig.engine.drive();
+        assert_eq!(rig.host.take_did(), vec![Did::Stop("a1".to_owned())]);
+        let saved = Persisted::load(&rig.engine.config.state_path());
+        assert_eq!(saved.unread_count, 0);
+        assert_eq!(saved.pilot_mode, PilotMode::Human);
     }
 }
