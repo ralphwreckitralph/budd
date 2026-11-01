@@ -2155,7 +2155,11 @@ mod tests {
 
     #[test]
     fn a_redirect_onto_an_existing_file_asks() {
-        let existing = |path: &Path| path == Path::new("/tmp/notes.txt") || path == Path::new("/abs/out.log");
+        // The relative target is joined onto the cwd, with the platform's separator.
+        let existing = |path: &Path| {
+            path.parent() == Some(Path::new("/tmp")) && path.file_name().is_some_and(|name| name == "notes.txt")
+                || path == Path::new("/abs/out.log")
+        };
         let run = |command: &str| classify(&evaluate("Bash", json!({"command": command}), Some(TYPED), &existing));
         assert_eq!(run("echo hi > notes.txt"), "ask", "relative to cwd");
         assert_eq!(run("echo hi >notes.txt"), "ask");
