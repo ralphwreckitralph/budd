@@ -1,0 +1,6 @@
+# Written by `budd kit install`, never by hand, never tracked:
+# the binary is the app's sidecar copied in, hooks.json is rendered from hooks/hooks.template.json,
+# and .budd-state.json is the install's own bookkeeping.
+bin/
+hooks/hooks.json
+.budd-state.json

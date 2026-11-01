@@ -1,0 +1,20 @@
+{
+  "name": "budd-kit",
+  "owner": {
+    "name": "Budd project",
+    "url": "https://github.com/ralphwreckitralph/budd"
+  },
+  "metadata": {
+    "description": "Local marketplace that Budd installs into ~/.budd/pipeline/. It lists one plugin, the Budd pipeline kit, loaded in place from ./budd.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "budd",
+      "source": "./budd",
+      "description": "Budd's pipeline kit: skills, agents, references and exec-form hooks calling the budd binary.",
+      "version": "0.1.0",
+      "category": "workflow"
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "description": "Template for hooks.json. `budd kit install` renders it by replacing {{EXE}} with `.exe` on Windows and nothing elsewhere, and `budd kit verify` refuses a live hooks.json that does not match this rendering. Every entry is exec-form: Claude Code runs the binary directly, with no shell in between, and `budd hook <Event>` reads the event JSON on stdin and dispatches to the gate, guard, budget, rethinker trigger, lint-edit, session-start and state writers that gamecenter wired as separate shell hooks.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|MultiEdit|Write|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "PreToolUse"],
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "PreToolUse", "--budget"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "PostToolUse"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "UserPromptSubmit"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "SessionStart"],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "Notification"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "Stop"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "StopFailure"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/budd{{EXE}}",
+            "args": ["hook", "SessionEnd"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
