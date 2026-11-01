@@ -1,0 +1,25 @@
+{
+ "event": "Notification",
+ "env": {
+  "CLAUDE_CODE_ENTRYPOINT": "cli",
+  "CLAUDE_CODE_CHILD_SESSION": "1",
+  "CLAUDE_PID": "1943",
+  "CLAUDE_PROJECT_DIR": "/Users/alice/webserver/assistant-avatar",
+  "CLAUDE_CODE_SESSION_ATTENDED": "0",
+  "CLAUDE_JOB_DIR": "/Users/alice/.claude-budd/jobs/cc7d868c",
+  "CLAUDE_CONFIG_DIR": "/Users/alice/.claude-budd",
+  "CLAUDE_CODE_SESSION_ID": "cc7d868c-70f8-4ba2-9c41-4352667c6a4a",
+  "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/cc-socks/1943.sock",
+  "CLAUDECODE": "1"
+ },
+ "stdin": {
+  "session_id": "cc7d868c-70f8-4ba2-9c41-4352667c6a4a",
+  "transcript_path": "/Users/alice/.claude-budd/projects/-Users-alice-webserver-assistant-avatar/cc7d868c-70f8-4ba2-9c41-4352667c6a4a.jsonl",
+  "cwd": "/Users/alice/webserver/assistant-avatar",
+  "scratchpad_dir": "/private/tmp/claude-501/scratch",
+  "prompt_id": "df8d5af5-c032-4bb4-abd1-0395fbadfe49",
+  "hook_event_name": "Notification",
+  "message": "Claude is waiting for your input",
+  "notification_type": "idle_prompt"
+ }
+}
