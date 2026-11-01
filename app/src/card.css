@@ -1,0 +1,86 @@
+:root {
+  color-scheme: light dark;
+  --paper: rgb(250, 250, 252);
+  --ink: rgb(28, 30, 40);
+  --muted: rgba(28, 30, 40, 0.6);
+  --edge: rgba(0, 0, 0, 0.14);
+  --field: rgb(255, 255, 255);
+  --accent: rgb(92, 160, 255);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: rgb(38, 40, 54);
+    --ink: rgba(255, 255, 255, 0.93);
+    --muted: rgba(255, 255, 255, 0.56);
+    --edge: rgba(255, 255, 255, 0.12);
+    --field: rgb(30, 32, 44);
+  }
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font: 13px system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+}
+
+.card {
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--paper);
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.name {
+  font-weight: 700;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  padding: 3px 10px;
+  cursor: default;
+}
+
+button:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+
+textarea {
+  flex: 1;
+  resize: none;
+  font: inherit;
+  color: var(--ink);
+  background: var(--field);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+textarea:focus {
+  border-color: var(--accent);
+}
+
+footer {
+  color: var(--muted);
+  font-size: 11px;
+}
