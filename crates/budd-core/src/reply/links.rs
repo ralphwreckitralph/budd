@@ -3,6 +3,7 @@
 //! few replies back is still one click away.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -19,7 +20,8 @@ static LOCAL_PATTERN: LazyLock<Regex> =
 static REPOSITORY_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"github\.com/[^/]+/[^/]+").unwrap());
 
 /// What kind of thing a link points at. The order is the order the card shows them in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LinkKind {
     /// A GitHub pull request.
     PullRequest,
@@ -36,7 +38,7 @@ pub enum LinkKind {
 }
 
 /// One thing a session pointed at, as a button: its kind, label and where it goes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplyLink {
     /// What it points at.
     pub kind: LinkKind,

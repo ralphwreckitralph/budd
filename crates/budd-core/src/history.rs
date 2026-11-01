@@ -6,11 +6,12 @@
 use crate::delivery::shortened;
 use crate::text::without_image_markers;
 use crate::transcript::{Entry, TranscriptReader, whole_lines};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 
 /// One exchange in a session's history: the human's message and the last thing the session said to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryTurn {
     /// The transcript entry the message is, which tells two turns apart even when the human said the same
     /// thing twice; `None` for an entry without one.
