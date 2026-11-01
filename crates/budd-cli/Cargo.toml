@@ -7,4 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "budd"
+path = "src/main.rs"
+
 [dependencies]
+budd-core = { path = "../budd-core" }
+budd-claude = { path = "../budd-claude" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = { workspace = true }
