@@ -517,6 +517,12 @@ impl Claude {
         }
     }
 
+    /// Logs the config folder out of its account, as `claude auth logout` does. The credentials are
+    /// Claude Code's to remove; Budd never reads them.
+    pub fn auth_logout(&self) -> Result<(), Error> {
+        self.run_checked(&["auth", "logout"], &Self::neutral_cwd()).map(|_| ())
+    }
+
     /// The MCP servers the folder's sessions load, health-checked by `claude mcp list`, which takes a
     /// few seconds.
     pub fn mcp_list(&self) -> Result<Vec<McpServerStatus>, Error> {
