@@ -66,14 +66,13 @@ pub enum HookError {
     Io(#[from] io::Error),
 }
 
-/// The Budd home folder: `BUDD_HOME`, else `~/.budd` with `~` from `HOME` (`USERPROFILE` on Windows).
-/// A private stand-in until the paths module lands.
+/// The Budd home folder: `BUDD_HOME`, else `~/.budd`, as `paths::BuddHome` resolves it; with neither set,
+/// `./.budd`, so a hook never fails for want of a home.
 pub(crate) fn budd_home(lookup: impl Fn(&str) -> Option<String>) -> PathBuf {
-    if let Some(home) = lookup(HOME_VAR).filter(|home| !home.is_empty()) {
-        return PathBuf::from(home);
-    }
     let user_home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    PathBuf::from(lookup(user_home).unwrap_or_else(|| ".".to_owned())).join(".budd")
+    crate::paths::BuddHome::from_vars(lookup(HOME_VAR).map(Into::into), lookup(user_home).map(Into::into))
+        .map(|home| home.root().to_path_buf())
+        .unwrap_or_else(|_| PathBuf::from(".").join(".budd"))
 }
 
 /// Appends one line about `message` to `<home>/logs/hook.log`, with the time. Failing to log is ignored.

@@ -44,10 +44,10 @@ impl Endpoint {
         }
     }
 
-    /// Budd's own endpoint: `<home>/run/budd.sock` on Unix, `\\.\pipe\budd-<user>` on Windows.
+    /// Budd's own endpoint: `<home>/run/budd.sock` on Unix, the pipe `paths::pipe_name` gives on Windows.
     pub fn default_for(home: &Path, user: &str) -> Endpoint {
         if cfg!(windows) {
-            Endpoint::NamedPipe(format!("{PIPE_PREFIX}budd-{user}"))
+            Endpoint::NamedPipe(crate::paths::pipe_name(user))
         } else {
             Endpoint::UnixSocket(home.join("run").join("budd.sock"))
         }
@@ -238,7 +238,7 @@ mod tests {
         );
         let own = Endpoint::default_for(Path::new("/home/alice/.budd"), "alice");
         if cfg!(windows) {
-            assert_eq!(own, Endpoint::NamedPipe(r"\\.\pipe\budd-alice".to_owned()));
+            assert_eq!(own, Endpoint::NamedPipe(crate::paths::pipe_name("alice")));
         } else {
             assert_eq!(
                 own,

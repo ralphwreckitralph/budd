@@ -23,15 +23,7 @@ pub struct NoHome {
     pub home_var: &'static str,
 }
 
-/// Where the daemon listens: a Unix socket in Budd's run folder, or a named pipe on Windows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Endpoint {
-    /// `<budd home>/run/budd.sock`, in a folder only the user may enter.
-    UnixSocket(PathBuf),
-    /// `\\.\pipe\budd-<hex>`, where the hex is a hash of the user's name so two users on one machine
-    /// never share a pipe name.
-    NamedPipe(String),
-}
+pub use crate::ipc::Endpoint;
 
 /// Budd's folder and every path under it.
 #[derive(Debug, Clone, PartialEq, Eq)]

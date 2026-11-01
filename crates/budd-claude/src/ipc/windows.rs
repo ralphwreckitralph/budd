@@ -25,18 +25,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
-    CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-// windows-sys gates ConnectNamedPipe behind its Win32_System_IO feature, for the OVERLAPPED type of its
-// second argument, which this crate does not enable. Only a null OVERLAPPED is ever passed here, so the
-// pointer type can be opaque; the ABI is the same.
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn ConnectNamedPipe(hnamedpipe: HANDLE, lpoverlapped: *mut c_void) -> i32;
-}
 
 /// `text` as a NUL-terminated UTF-16 string.
 fn wide(text: &str) -> Vec<u16> {
