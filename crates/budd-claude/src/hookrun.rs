@@ -7,10 +7,13 @@
 //! session to read. It replaces the Python hooks avatar-state.py, session_size.py and recent-context.py.
 //!
 //! The hook never fails: whatever goes wrong is written to `<home>/logs/hook.log` and the process exits 0,
-//! since a broken hook must not disturb the session.
+//! since a broken hook must not disturb the session. The one exception is the destructive gate on
+//! PreToolUse, which fails closed: when it cannot run, the call is refused rather than let through.
 
+pub mod gate_io;
 pub mod transcript_io;
 
+use crate::gate::{self, ConsentCheck, Gate, GateInput, Verdict};
 use crate::procs;
 use crate::state_files::Dir;
 use budd_core::hook::{
@@ -20,6 +23,8 @@ use budd_core::hook::{
 use budd_core::presence::SessionReport;
 use budd_core::text::content_text;
 use budd_core::transcript::Entry;
+use gate_io::Record;
+use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +45,8 @@ pub const CHAT_PREFIX: &str = "chat-";
 /// Where the hook reads and writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dirs {
+    /// The Budd home: `config.json` with the gate switch, and `state/` with the consent log.
+    pub home: PathBuf,
     /// Budd's own state files.
     pub sessions: Dir,
     /// A second folder that gets the same files, for the existing macOS app, when configured.
@@ -51,6 +58,8 @@ pub struct Dirs {
 pub struct Outcome {
     /// The state file written, or `None` when the event leaves the file alone or names no session.
     pub report: Option<SessionReport>,
+    /// The destructive gate's verdict, on a PreToolUse event with the gate on.
+    pub gate: Option<Verdict>,
     /// Failures that did not stop the report from being written: the legacy copy, pruning, the bridge.
     pub warnings: Vec<String>,
 }
@@ -119,6 +128,7 @@ pub fn main(options: Options) {
             .map(PathBuf::from)
     });
     let dirs = Dirs {
+        home: home.clone(),
         sessions: Dir(home.join("state").join("sessions")),
         legacy: legacy.map(Dir),
     };
@@ -139,7 +149,15 @@ pub fn main(options: Options) {
             }
         }
         Ok(Err(error)) => log(&home, &error.to_string()),
-        Err(_) => log(&home, "the hook panicked"),
+        Err(_) => {
+            log(&home, "the hook panicked");
+            // A panic before the gate answered must not let a tool call through.
+            if input.contains("PreToolUse") && gate_io::enabled(&home) {
+                let mut out = io::stdout().lock();
+                let _ = writeln!(out, "{}", gate::fail_closed_output("the gate panicked"));
+                let _ = out.flush();
+            }
+        }
     }
 }
 
@@ -147,28 +165,48 @@ pub fn main(options: Options) {
 /// Writes the session's state file (and reply file on Stop and StopFailure) under `dirs`, and prints the
 /// recent-context bridge to `out` on a fresh start of the assistant or a chat.
 pub fn run(input: &str, env: &[(String, String)], dirs: &Dirs, out: &mut dyn Write) -> Result<Outcome, HookError> {
-    let input = HookInput::decode(input).ok_or(HookError::NotJson)?;
+    let Some(input) = HookInput::decode(input) else {
+        // Unreadable input could be any event, a tool call among them: the gate fails closed.
+        if gate_io::enabled(&dirs.home) {
+            let _ = writeln!(out, "{}", gate::fail_closed_output("unreadable hook input"));
+        }
+        return Err(HookError::NotJson);
+    };
     let hook_env = HookEnv::from_pairs(env.iter().map(|(k, v)| (k.as_str(), v.clone())));
     let lookup = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
     let mut outcome = Outcome::default();
     if report(&input).is_none() {
         return Ok(outcome);
     }
-    let Some(session_id) = input
+    let session_id = input
         .session_id
         .clone()
         .or_else(|| hook_env.claude_code_session_id.clone())
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(outcome);
-    };
+        .filter(|id| !id.is_empty());
     let event = input.hook_event_name.as_deref().unwrap_or("");
-    let previous = dirs.sessions.read_report(&session_id);
-
     let config_dir = lookup("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| config_dir_of(input.transcript_path.as_deref()));
-    let transcript = transcript_of(&input, &session_id, config_dir.as_deref());
+    let transcript = match &session_id {
+        Some(session_id) => transcript_of(&input, session_id, config_dir.as_deref()),
+        None => input.transcript_path.clone().map(PathBuf::from),
+    };
+    // The gate answers first, so Claude Code reads the decision whatever else the hook does after.
+    if event == "PreToolUse" {
+        gate_step(
+            &input,
+            session_id.as_deref().unwrap_or(""),
+            transcript.as_deref(),
+            dirs,
+            out,
+            &mut outcome,
+        );
+    }
+    let Some(session_id) = session_id else {
+        return Ok(outcome);
+    };
+    let previous = dirs.sessions.read_report(&session_id);
+
     let context = if matches!(event, "PostToolUse" | "Stop" | "StopFailure") {
         transcript.as_deref().and_then(context_tokens)
     } else {
@@ -228,6 +266,76 @@ pub fn run(input: &str, env: &[(String, String)], dirs: &Dirs, out: &mut dyn Wri
     }
     outcome.report = Some(next);
     Ok(outcome)
+}
+
+/// Runs the destructive gate over a PreToolUse event: prints the decision to `out` when there is one,
+/// records every token spent, refusal and prompt, and notes a gate that is switched off. The verdict goes
+/// in `outcome.gate`, what could not be written in `outcome.warnings`.
+fn gate_step(
+    input: &HookInput,
+    session_id: &str,
+    transcript: Option<&Path>,
+    dirs: &Dirs,
+    out: &mut dyn Write,
+    outcome: &mut Outcome,
+) {
+    if !gate_io::enabled(&dirs.home) {
+        outcome.warnings.push(
+            "destructive gate is off (kit.gates.destructive is false): the tool call was not evaluated".to_owned(),
+        );
+        return;
+    }
+    let tool_name = input.tool_name.as_deref().unwrap_or("");
+    let tool_input = input.tool_input.clone().unwrap_or(Value::Null);
+    let typed_by_human =
+        |token: &str, first_word: &str| transcript.is_some_and(|path| gate_io::typed_by_human(path, token, first_word));
+    let consent: Option<ConsentCheck<'_>> = transcript.is_some().then_some(&typed_by_human);
+    let is_file = |path: &Path| path.is_file();
+    let verdict = Gate.evaluate(&GateInput {
+        tool_name,
+        tool_input,
+        cwd: input.cwd.as_deref().unwrap_or("."),
+        transcript_lines_for_consent: consent,
+        is_file: &is_file,
+    });
+    let consent_log = dirs.home.join("state").join(gate_io::CONSENT_LOG);
+    if let Some(answer) = gate::hook_output(&verdict, &consent_log)
+        && let Err(error) = writeln!(out, "{answer}")
+    {
+        outcome.warnings.push(format!("printing the gate's answer: {error}"));
+    }
+    let command = described_call(tool_name, input.tool_input.as_ref());
+    let record = |kind: &'static str, slug: &str| Record {
+        at: now(),
+        session_id: session_id.to_owned(),
+        kind,
+        slug: slug.to_owned(),
+        command: command.clone(),
+    };
+    let records: Vec<Record> = match &verdict {
+        Verdict::Allow { consent_used } => consent_used.iter().map(|slug| record("consent", slug)).collect(),
+        Verdict::Ask { slug, .. } => vec![record("asked", slug)],
+        Verdict::Deny { slug, .. } => vec![record("blocked", slug)],
+    };
+    for entry in &records {
+        outcome
+            .warnings
+            .extend(gate_io::record(&dirs.home, dirs.sessions.path(), entry));
+    }
+    outcome.gate = Some(verdict);
+}
+
+/// The call as the consent log names it: a Bash command as typed, another tool by name and the file it
+/// names.
+fn described_call(tool_name: &str, tool_input: Option<&Value>) -> String {
+    let field = |key: &str| tool_input.and_then(|v| v.get(key)).and_then(Value::as_str);
+    if tool_name == "Bash" {
+        return field("command").unwrap_or("").to_owned();
+    }
+    match field("file_path") {
+        Some(path) => format!("{tool_name} {path}"),
+        None => tool_name.to_owned(),
+    }
 }
 
 /// The config folder a transcript path is under: `<config>/projects/<slug>/<id>.jsonl`.
@@ -452,6 +560,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_transcripts(temp.path());
         let dirs = Dirs {
+            home: temp.path().to_path_buf(),
             sessions: Dir(temp.path().join("sessions")),
             legacy: Some(Dir(temp.path().join("legacy"))),
         };
@@ -536,6 +645,7 @@ mod tests {
     fn the_first_stop_writes_pong_and_the_turn_is_carried() {
         let temp = tempfile::tempdir().unwrap();
         let dirs = Dirs {
+            home: temp.path().to_path_buf(),
             sessions: Dir(temp.path().join("sessions")),
             legacy: None,
         };
@@ -574,11 +684,16 @@ mod tests {
     fn garbage_and_eventless_input_do_nothing() {
         let temp = tempfile::tempdir().unwrap();
         let dirs = Dirs {
+            home: temp.path().to_path_buf(),
             sessions: Dir(temp.path().join("sessions")),
             legacy: None,
         };
         let mut out = Vec::new();
         assert!(matches!(run("not json", &[], &dirs, &mut out), Err(HookError::NotJson)));
+        // The gate is on by default, so unreadable input is refused rather than let through.
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "deny");
+        out.clear();
         let quiet = run(
             r#"{"hook_event_name":"SomethingNew","session_id":"s"}"#,
             &[],
@@ -597,6 +712,7 @@ mod tests {
     fn a_session_start_prunes_old_files() {
         let temp = tempfile::tempdir().unwrap();
         let dirs = Dirs {
+            home: temp.path().to_path_buf(),
             sessions: Dir(temp.path().join("sessions")),
             legacy: None,
         };
@@ -723,5 +839,224 @@ mod tests {
         );
         assert_eq!(config_dir_of(Some("/c/other/-x/id.jsonl")), None);
         assert_eq!(config_dir_of(None), None);
+    }
+
+    /// A home folder with the gate switch set as `destructive` says, and the hook's folders under it.
+    fn home_with_gate(temp: &Path, destructive: bool) -> Dirs {
+        let home = temp.join("budd");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("config.json"),
+            format!(r#"{{"kit": {{"gates": {{"destructive": {destructive}}}}}}}"#),
+        )
+        .unwrap();
+        Dirs {
+            sessions: Dir(home.join("state").join("sessions")),
+            legacy: None,
+            home,
+        }
+    }
+
+    /// A PreToolUse event for a Bash command in session `sid`, with `transcript` as its transcript.
+    fn pre_tool_use(command: &str, transcript: &Path) -> String {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sid",
+            "transcript_path": transcript,
+            "cwd": "/tmp",
+            "tool_name": "Bash",
+            "tool_input": {"command": command, "description": "Try it"},
+        })
+        .to_string()
+    }
+
+    fn user_line(text: &str) -> String {
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+    }
+
+    #[test]
+    fn the_gate_answers_a_pre_tool_use_and_the_state_file_is_still_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("sid.jsonl");
+        fs::write(&transcript, user_line("please tidy up")).unwrap();
+        let dirs = home_with_gate(temp.path(), true);
+        let mut out = Vec::new();
+        let outcome = run(&pre_tool_use("rm -rf /Users/x/junk", &transcript), &[], &dirs, &mut out).unwrap();
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            matches!(&outcome.gate, Some(Verdict::Deny { slug: "bulk-rm", .. })),
+            "{:?}",
+            outcome.gate
+        );
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        let report = outcome.report.unwrap();
+        assert_eq!(report.state, "working");
+        assert_eq!(report.detail.as_deref(), Some("Try it"));
+        assert_eq!(dirs.sessions.read_report("sid").unwrap().state, "working");
+        // The refusal is in the consent log and in the session's events.
+        let log = fs::read_to_string(dirs.home.join("state").join("consent.log")).unwrap();
+        let entry: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        assert_eq!(entry["kind"], "blocked");
+        assert_eq!(entry["slug"], "bulk-rm");
+        assert_eq!(entry["session_id"], "sid");
+        assert_eq!(entry["command"], "rm -rf /Users/x/junk");
+        assert!(entry["at"].as_f64().unwrap() > 0.0);
+        let events = fs::read_to_string(dirs.sessions.path().join("sid.events.jsonl")).unwrap();
+        assert_eq!(events.lines().count(), 1);
+        assert_eq!(log.lines().count(), 1);
+
+        // An ask is printed and logged as asked; a plain allow prints nothing and logs nothing.
+        let mut out = Vec::new();
+        let outcome = run(&pre_tool_use("mv src/*.vue old/", &transcript), &[], &dirs, &mut out).unwrap();
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert!(matches!(&outcome.gate, Some(Verdict::Ask { slug: "mv-glob", .. })));
+        let mut out = Vec::new();
+        let outcome = run(&pre_tool_use("ls -la", &transcript), &[], &dirs, &mut out).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            outcome.gate,
+            Some(Verdict::Allow {
+                consent_used: Vec::new()
+            })
+        );
+        let log = fs::read_to_string(dirs.home.join("state").join("consent.log")).unwrap();
+        assert_eq!(log.lines().count(), 2, "blocked and asked, not the allow");
+        assert_eq!(
+            fs::read_to_string(dirs.sessions.path().join("sid.events.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+
+        // Other tools go through the gate too.
+        let mut out = Vec::new();
+        let edit = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sid",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/r/a.ts", "old_string": "a", "new_string": "b", "replace_all": true},
+        })
+        .to_string();
+        let outcome = run(&edit, &[], &dirs, &mut out).unwrap();
+        assert!(matches!(
+            &outcome.gate,
+            Some(Verdict::Ask {
+                slug: "replace-all",
+                ..
+            })
+        ));
+        let log = fs::read_to_string(dirs.home.join("state").join("consent.log")).unwrap();
+        let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(last["command"], "Edit /r/a.ts");
+        // Events other than PreToolUse are not judged.
+        let mut out = Vec::new();
+        let stop =
+            serde_json::json!({"hook_event_name": "Stop", "session_id": "sid", "last_assistant_message": "rm -rf /"})
+                .to_string();
+        let outcome = run(&stop, &[], &dirs, &mut out).unwrap();
+        assert_eq!(outcome.gate, None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn consent_counts_only_when_the_human_typed_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("sid.jsonl");
+        let dirs = home_with_gate(temp.path(), true);
+        let command = "I_CONSENT=bulk-rm rm -rf /Users/x/junk";
+        // The token is on the command but nowhere in the transcript: refused, and the refusal says so.
+        fs::write(&transcript, user_line("go ahead")).unwrap();
+        let mut out = Vec::new();
+        let outcome = run(&pre_tool_use(command, &transcript), &[], &dirs, &mut out).unwrap();
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = printed["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains("consent token was not typed by the human"), "{reason}");
+        assert!(matches!(&outcome.gate, Some(Verdict::Deny { slug: "bulk-rm", .. })));
+        // A `user` entry that is meta (hook output, a reminder) does not count either.
+        let meta = serde_json::json!({"type": "user", "isMeta": true, "message": {"content": command}}).to_string();
+        fs::write(&transcript, [user_line("go ahead"), meta].join("\n")).unwrap();
+        let mut out = Vec::new();
+        run(&pre_tool_use(command, &transcript), &[], &dirs, &mut out).unwrap();
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "deny");
+        // Typed by the human: allowed, announced, and logged as consent.
+        fs::write(&transcript, [user_line("go ahead"), user_line(command)].join("\n")).unwrap();
+        let mut out = Vec::new();
+        let outcome = run(&pre_tool_use(command, &transcript), &[], &dirs, &mut out).unwrap();
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            printed["systemMessage"],
+            format!(
+                "Guardrail consent used: bulk-rm. Logged to {}.",
+                dirs.home.join("state").join("consent.log").display()
+            )
+        );
+        assert_eq!(
+            outcome.gate,
+            Some(Verdict::Allow {
+                consent_used: vec!["bulk-rm".to_owned()]
+            })
+        );
+        let log = fs::read_to_string(dirs.home.join("state").join("consent.log")).unwrap();
+        let kinds: Vec<String> = log
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<Value>(l).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(kinds, ["blocked", "blocked", "consent"]);
+        // No transcript at all: the token is refused.
+        let mut out = Vec::new();
+        run(
+            &pre_tool_use(command, &temp.path().join("missing.jsonl")),
+            &[],
+            &dirs,
+            &mut out,
+        )
+        .unwrap();
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn the_switch_turns_the_gate_off_and_unreadable_input_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("sid.jsonl");
+        fs::write(&transcript, user_line("hi")).unwrap();
+        let dirs = home_with_gate(temp.path(), false);
+        let mut out = Vec::new();
+        let outcome = run(&pre_tool_use("rm -rf /Users/x/junk", &transcript), &[], &dirs, &mut out).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        assert_eq!(outcome.gate, None);
+        assert_eq!(
+            outcome.warnings,
+            ["destructive gate is off (kit.gates.destructive is false): the tool call was not evaluated"]
+        );
+        assert_eq!(outcome.report.unwrap().state, "working");
+        assert!(!dirs.home.join("state").join("consent.log").exists());
+        // Off, unreadable input is only an error.
+        let mut out = Vec::new();
+        assert!(matches!(run("not json", &[], &dirs, &mut out), Err(HookError::NotJson)));
+        assert!(out.is_empty());
+        // On, it is a refusal: the gate fails closed.
+        let on = home_with_gate(&temp.path().join("other"), true);
+        let mut out = Vec::new();
+        assert!(matches!(run("not json", &[], &on, &mut out), Err(HookError::NotJson)));
+        let printed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            printed["hookSpecificOutput"]["permissionDecisionReason"],
+            "destructive-gate: unreadable hook input, failing closed."
+        );
     }
 }
