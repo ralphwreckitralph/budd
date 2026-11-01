@@ -1,0 +1,9 @@
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "email": "budd@example.com",
+  "orgName": "Example Org",
+  "subscriptionType": "max",
+  "configDirectory": "/Users/example/.budd/claude"
+}

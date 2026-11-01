@@ -4,9 +4,9 @@
 
 pub mod claude_cli;
 pub mod compat;
-pub mod procs;
-pub mod state_files;
 pub mod hookrun;
 pub mod ipc;
 pub mod mcp_stdio;
 pub mod paths;
+pub mod procs;
+pub mod state_files;
