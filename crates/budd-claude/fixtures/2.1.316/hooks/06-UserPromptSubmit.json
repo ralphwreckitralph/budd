@@ -1,0 +1,26 @@
+{
+ "event": "UserPromptSubmit",
+ "env": {
+  "CLAUDE_CODE_ENTRYPOINT": "cli",
+  "CLAUDE_CODE_CHILD_SESSION": "1",
+  "CLAUDE_PID": "5054",
+  "CLAUDE_PROJECT_DIR": "/Users/alice/webserver/assistant-avatar",
+  "CLAUDE_CODE_SESSION_ATTENDED": "0",
+  "CLAUDE_JOB_DIR": "/Users/alice/.claude-budd/jobs/f754f44d",
+  "CLAUDE_CONFIG_DIR": "/Users/alice/.claude-budd",
+  "CLAUDE_CODE_SESSION_ID": "f754f44d-10ef-4d93-9284-042d19dc90e5",
+  "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/cc-socks/5054.sock",
+  "CLAUDECODE": "1"
+ },
+ "stdin": {
+  "session_id": "f754f44d-10ef-4d93-9284-042d19dc90e5",
+  "transcript_path": "/Users/alice/.claude-budd/projects/-Users-alice-webserver-assistant-avatar/f754f44d-10ef-4d93-9284-042d19dc90e5.jsonl",
+  "cwd": "/Users/alice/webserver/assistant-avatar",
+  "scratchpad_dir": "/private/tmp/claude-501/scratch",
+  "prompt_id": "c5622bcc-a6b4-410a-bc91-72c49b4e1953",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Reply with the single word pang.",
+  "session_title": "spike0"
+ }
+}
