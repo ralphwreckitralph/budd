@@ -1,1 +1,0 @@
-//! Reply lines, links, autopilot, unread replies, ticket keys, evidence, attachments (from AvatarCore/ReplyOptions.swift, ReplyLinks.swift, Autopilot.swift, Unread.swift, TicketKeys.swift, Evidence.swift, DropCatch.swift, Thinking.swift).
