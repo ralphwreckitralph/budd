@@ -58,13 +58,18 @@ pub fn collapsed(text: &str) -> String {
     WHITESPACE.replace_all(text.trim(), " ").into_owned()
 }
 
-/// The contents of the first `<name>…</name>` tag in `text`, trimmed, or `None` without one.
+/// The contents of the first `<name>…</name>` tag in `text`, trimmed, or `None` without one or when it is empty.
 pub fn tag(name: &str, text: &str) -> Option<String> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
     let start = text.find(&open)? + open.len();
     let end = text[start..].find(&close)? + start;
-    Some(text[start..end].trim().to_owned())
+    let inside = text[start..end].trim();
+    if inside.is_empty() {
+        None
+    } else {
+        Some(inside.to_owned())
+    }
 }
 
 /// The text of a transcript entry's `message.content`: a string, or the `text` parts of a list joined by newlines.

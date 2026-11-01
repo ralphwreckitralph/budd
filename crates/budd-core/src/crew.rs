@@ -322,6 +322,7 @@ pub fn check_start<S: AsRef<str>>(
     if req.chrome {
         argv.push("--chrome".to_owned());
     }
+    argv.push(req.brief.trim().to_owned());
     Ok(argv)
 }
 
@@ -584,7 +585,14 @@ mod tests {
         let live = ["assistant", "casbo-1055"];
         assert_eq!(
             check_start(&request("casbo-1077", "Fix the thing"), &live, "auto"),
-            Ok(flags(["--bg", "--name", "casbo-1077", "--permission-mode", "auto"]))
+            Ok(flags([
+                "--bg",
+                "--name",
+                "casbo-1077",
+                "--permission-mode",
+                "auto",
+                "Fix the thing"
+            ]))
         );
         let full = StartRequest {
             model: Some("opus".to_owned()),
@@ -604,7 +612,8 @@ mod tests {
                 "opus",
                 "--add-dir",
                 "/Users/alice",
-                "--chrome"
+                "--chrome",
+                "Fix the thing"
             ]))
         );
         assert_eq!(

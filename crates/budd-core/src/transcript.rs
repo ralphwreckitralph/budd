@@ -5,16 +5,12 @@
 
 use crate::delivery::{last_path_component, shell_command, shell_output};
 use crate::history::{HistoryTurn, TranscriptSource};
-use crate::text::{human_text, is_work_command, without_image_markers};
-use regex::Regex;
+use crate::text::{human_text, is_work_command};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::LazyLock;
 use unicode_segmentation::UnicodeSegmentation;
-
-static PASTE_OPEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<pasted_content[^>]*> ?").unwrap());
 
 /// Deserialises a field as the Swift `as?` cast did: a value of another shape reads as `None` rather
 /// than failing the whole entry.
@@ -319,18 +315,7 @@ impl TranscriptSummary {
 /// without the pictures' "[Image #1]" markers, and cut short as the hook cuts it. Ported from
 /// `SessionReport.turn(_:isFor:)` in AvatarCore/Presence.swift; the presence module should reuse it.
 pub fn turn_is_for(turn: &str, message: &str) -> bool {
-    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Claude Code wraps a long message, which arrives as one burst, in a pasted_content tag.
-    let unwrapped = PASTE_OPEN.replace(&words(turn), "").into_owned();
-    let pictured = without_image_markers(&unwrapped) != unwrapped;
-    let bare = words(&without_image_markers(&unwrapped));
-    // The hook cuts long prompts to 139 characters plus "…".
-    let prompt = bare.strip_suffix('…').unwrap_or(&bare);
-    // A picture sent on its own leaves nothing but its marker.
-    if prompt.is_empty() {
-        return pictured && words(message).is_empty();
-    }
-    words(message).starts_with(prompt)
+    crate::presence::SessionReport::turn_is_for(turn, message)
 }
 
 /// The `type` of a content part.

@@ -1,13 +1,9 @@
 //! What a running step shows over Budd's desk and on a conversation card: the kind of tool in the
 //! thought cloud, the bubble line while an answer is awaited, and which message and answer the card pairs.
 
-use crate::text::{human_text, without_image_markers};
-use regex::Regex;
+use crate::text::human_text;
 use serde_json::Value;
-use std::sync::LazyLock;
 use unicode_segmentation::UnicodeSegmentation;
-
-static PASTE_OPEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<pasted_content[^>]*> ?").unwrap());
 
 /// The kind of tool a running step uses, for the glyph in the thought cloud over Budd's desk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -210,26 +206,10 @@ impl CardTurn {
     }
 }
 
-/// Whitespace runs in `text` joined by one space.
-fn words(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Whether `turn`, the prompt as the hook records it, is `message`: the text alone, without the
-/// pictures' "[Image #1]" markers, and cut short as the hook cuts it. A copy of `SessionReport.turn(isFor:)`
-/// until the presence module lands.
+/// pictures' "[Image #1]" markers, and cut short as the hook cuts it. It is `SessionReport::turn_is_for`.
 fn turn_is_for(turn: &str, message: &str) -> bool {
-    // Claude Code wraps a long message, which arrives as one burst, in a pasted_content tag.
-    let unwrapped = PASTE_OPEN.replace(&words(turn), "").into_owned();
-    let pictured = without_image_markers(&unwrapped) != unwrapped;
-    let bare = words(&without_image_markers(&unwrapped));
-    // The hook cuts long prompts to 139 characters plus "…".
-    let prompt = bare.strip_suffix('…').unwrap_or(&bare);
-    // A picture sent on its own leaves nothing but its marker.
-    if prompt.is_empty() {
-        return pictured && words(message).is_empty();
-    }
-    words(message).starts_with(prompt)
+    crate::presence::SessionReport::turn_is_for(turn, message)
 }
 
 #[cfg(test)]
