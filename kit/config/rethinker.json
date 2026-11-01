@@ -1,0 +1,44 @@
+{
+  "description": "Which skill classes fire the rethinker gate that `budd hook` injects on PostToolUse (Skill) and UserPromptSubmit (/<skill>). Names are matched on the part after the last colon, so /budd:do-it matches do-it. A project may add its own skills to a class through the profile; the classes themselves are the kit's.",
+  "classes": {
+    "skip": {
+      "why": "Nothing to rethink: loaders, format rewrites, read-only recall, the handover, and grill-me itself (rethinking grill-me would loop).",
+      "skills": [
+        "grill-me", "insimpleterms", "make-it-easy", "reset-session",
+        "keybindings-help", "update-config", "fewer-permission-prompts", "loop", "schedule", "init",
+        "claude-api", "run", "artifact-design", "artifact-capabilities", "artifact-diagramming",
+        "dataviz", "workflow-authoring", "claude-in-chrome"
+      ]
+    },
+    "model_skip": {
+      "why": "Skipped only when the model calls them as one step of another skill (PostToolUse). /code-review is the correctness engine of /budd:finalize-it Phase 1, run once per repo; the finalize hand-back is the rethinker's point. Typed by the human, the gate stays.",
+      "skills": ["code-review"]
+    },
+    "propose": {
+      "why": "Skills that write a proposal the human approves: the rethinker's points are folded into the plan before it is published, at most ONE question. The kit ships no proposal lane; a project adds its own here through the profile.",
+      "skills": []
+    },
+    "approved": {
+      "why": "Skills that run after the human's go-ahead: fix each point inside the approved scope, report the rest in the skill's own record, never ask. Only a point showing the solution cannot work, or would lose data or open a security hole, stops the work, as a Blocked note.",
+      "skills": ["finalize-it", "commit-it"]
+    },
+    "direct": {
+      "why": "The expectation lane: no proposal, no approval, the human typing it is the go-ahead. The rethinker reads the expectation document before the build, its points are folded in, never asked. Critical changes only: the lane's `surface` handover line decides.",
+      "skills": ["do-it"]
+    },
+    "learn": {
+      "why": "Unattended: the human reviews the lesson branch. Before it is proposed, fix each lesson a point shows is wrong or too big, drop one whose cause the rethinker could not confirm.",
+      "skills": ["learn-it"]
+    },
+    "nested_in_direct": {
+      "why": "Inside a /budd:do-it run, the last `surface` line of that run decides whether these spawn the rethinker; commit-it inside the lane spawns nothing because nothing changes between the seal and the commit.",
+      "skills": ["finalize-it", "commit-it"]
+    }
+  },
+  "surface_marker": {
+    "section": "surface",
+    "critical_line": "Critical  yes",
+    "skip_message_uiux": "Rethinker skipped - UI/UX only",
+    "skip_message_commit": "Rethinker skipped - nothing changed since the seal"
+  }
+}

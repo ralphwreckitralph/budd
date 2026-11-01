@@ -1,0 +1,12 @@
+{
+  "name": "budd",
+  "version": "0.1.0",
+  "description": "Budd's pipeline kit: the ticket-to-draft-PR lane (/budd:do-it), its finalize and commit gates, the learning loop, session handover, the rethinker and coding-standards reviewers, and the Reply/Decide contract Budd's office reads. Hooks are exec-form calls to the budd binary; project facts come from a Budd profile.",
+  "author": {
+    "name": "Budd project",
+    "url": "https://github.com/ralphwreckitralph/budd"
+  },
+  "homepage": "https://github.com/ralphwreckitralph/budd",
+  "license": "Apache-2.0",
+  "keywords": ["budd", "pipeline", "tickets", "gates", "evidence"]
+}
