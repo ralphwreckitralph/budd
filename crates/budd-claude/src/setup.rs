@@ -57,6 +57,9 @@ pub enum Error {
     /// The terminal could not be opened.
     #[error("opening the terminal: {0}")]
     Terminal(String),
+    /// The running daemon refused to reset.
+    #[error("the daemon did not reset: {0}")]
+    Daemon(String),
     /// The login did not come within the wait.
     #[error("no claude.ai login after {} s; run `budd connect` again when you have logged in", .0.as_secs())]
     LoginTimeout(Duration),
@@ -299,7 +302,7 @@ pub fn connect(
     out: &mut dyn Write,
 ) -> Result<AccountStatus, Error> {
     std::fs::create_dir_all(home.claude_dir()).map_err(io_error("creating", &home.claude_dir()))?;
-    let already = claude.auth_status().ok().filter(|status| logged_in_right(status));
+    let already = claude.auth_status().ok().filter(logged_in_right);
     let status = match already {
         Some(status) => {
             let _ = writeln!(out, "Budd's folder is already logged in as {}", status.summary());
@@ -513,7 +516,7 @@ pub fn reset(
     let mut report = ResetReport::default();
     match via_daemon() {
         Some(Ok(())) => report.via_daemon = true,
-        Some(Err(error)) => return Err(Error::Terminal(format!("the daemon did not reset: {error}"))),
+        Some(Err(error)) => return Err(Error::Daemon(error)),
         None => {}
     }
     let state = home.state_dir().join(STATE_FILE);
@@ -615,8 +618,10 @@ mod tests {
         }
         // The human's edits stay: the persona, the config, and their own hooks.
         std::fs::write(home.assistant_dir().join("CLAUDE.md"), "mine").unwrap();
-        let mut config = Config::default();
-        config.sounds = false;
+        let config = Config {
+            sounds: false,
+            ..Config::default()
+        };
         config.save(&home.config_path()).unwrap();
         let mut settings = settings;
         settings["hooks"]["PreCompact"] = json!([{"hooks": [{"type": "command", "command": "echo"}]}]);

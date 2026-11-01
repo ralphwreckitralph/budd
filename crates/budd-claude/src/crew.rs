@@ -153,7 +153,7 @@ pub fn ensure_trusted(config_dir: &Path, folder: &Path) -> io::Result<bool> {
         Err(error) => return Err(error),
     };
     let key = folder.to_string_lossy().into_owned();
-    if FolderTrust::trusted(&existing).iter().any(|trusted| *trusted == key) {
+    if FolderTrust::trusted(&existing).contains(&key) {
         return Ok(false);
     }
     let merged = FolderTrust::trusting(existing, &[key]);
